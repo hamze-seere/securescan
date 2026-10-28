@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+
+  --color-ink-950: #07090a;
+  --color-ink-900: #0c1012;
+  --color-ink-850: #11161a;
+  --color-ink-800: #161d22;
+  --color-ink-700: #222b31;
+  --color-ink-600: #33404a;
+  --color-ink-400: #7d8b95;
+  --color-ink-300: #a3b0b9;
+  --color-ink-100: #e4eaee;
+
+  --color-signal: #7cf0b4;
+  --color-signal-dim: #2a5c45;
+
+  --color-sev-critical: #ff5d6c;
+  --color-sev-high: #ff8f4d;
+  --color-sev-medium: #f5c451;
+  --color-sev-low: #6cb6ff;
+  --color-sev-pass: #5fd99a;
+
+  --animate-scan: scan 2.4s ease-in-out infinite;
+  --animate-fade-up: fade-up 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes scan {
+    0%, 100% { transform: translateY(0); opacity: 0; }
+    10%, 90% { opacity: 1; }
+    50% { transform: translateY(calc(var(--scan-h, 120px) - 2px)); }
+  }
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    background: var(--color-ink-950);
+  }
+  body {
+    @apply bg-ink-950 font-sans text-ink-100 antialiased;
+    background-image:
+      radial-gradient(60rem 30rem at 50% -10rem, rgb(124 240 180 / 0.07), transparent 70%),
+      linear-gradient(rgb(255 255 255 / 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.018) 1px, transparent 1px);
+    background-size: auto, 32px 32px, 32px 32px;
+  }
+  ::selection {
+    background: rgb(124 240 180 / 0.3);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-signal);
+    outline-offset: 2px;
+  }
+  code {
+    @apply rounded bg-ink-800 px-1 py-px font-mono text-[0.85em] text-ink-100;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
