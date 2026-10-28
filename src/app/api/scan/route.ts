@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { BlockedTargetError, runScan, UnreachableError } from "@/lib/scanner";
 import { rateLimit } from "@/lib/rateLimit";
+import { rememberScan } from "@/lib/reports";
 
 export const runtime = "nodejs"; // needs node:tls, node:dns, node:http
 export const dynamic = "force-dynamic";
@@ -48,6 +49,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const report = await runScan(url);
+    report.shareAvailable = await rememberScan(report);
     return json(report, 200, { "X-RateLimit-Remaining": String(limit.remaining) });
   } catch (err) {
     if (err instanceof BlockedTargetError) return json({ error: err.message }, 400);

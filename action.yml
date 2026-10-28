@@ -1,0 +1,48 @@
+name: "SecureScan security check"
+description: "Scan a deployed website with SecureScan and fail the workflow if its security grade drops below a minimum."
+author: "hamzeayuub-bot"
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  url:
+    description: "The website to scan (must be a site you own or are authorised to test)."
+    required: true
+  api-url:
+    description: "Base URL of a SecureScan deployment, e.g. https://securescan-hamze.vercel.app"
+    required: true
+  min-grade:
+    description: "Minimum acceptable grade: A+, A, B, C, D or F. The step fails below this."
+    required: false
+    default: "B"
+  share:
+    description: "Create a 30-day shareable report link (requires sharing to be configured on the API)."
+    required: false
+    default: "true"
+
+outputs:
+  grade:
+    description: "The grade the site received (A+ to F)."
+    value: ${{ steps.scan.outputs.grade }}
+  score:
+    description: "Numeric score out of 100."
+    value: ${{ steps.scan.outputs.score }}
+  report-url:
+    description: "Shareable report link, if sharing is enabled."
+    value: ${{ steps.scan.outputs.report-url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - id: scan
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/action/check.mjs"
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+        INPUT_MIN_GRADE: ${{ inputs.min-grade }}
+        INPUT_SHARE: ${{ inputs.share }}

@@ -8,6 +8,10 @@ import { checkHttpsRedirect, checkTls } from "./checks/transport";
 import { checkSecurityTxt, runExposureChecks } from "./checks/exposure";
 import { runContentChecks } from "./checks/content";
 import { PROBE_ORIGIN, runCorsCheck } from "./checks/cors";
+import { runEmailChecks } from "./checks/email";
+import { runDnsChecks } from "./checks/dns";
+import { createDnsClient, type DnsClient } from "./dnsClient";
+import net from "node:net";
 import { computeGrade, computeScore, summarize } from "./score";
 import type { FetchResult, Finding, ScanReport } from "./types";
 
@@ -41,7 +45,12 @@ const errorMessage = (e: unknown) => {
 };
 
 /** Runs every check against `input` and returns a graded report. Non-intrusive: GET/HEAD requests only. */
-export async function runScan(input: string): Promise<ScanReport> {
+export interface ScanOptions {
+  /** Inject a DNS client (used by tests). */
+  dns?: DnsClient;
+}
+
+export async function runScan(input: string, options: ScanOptions = {}): Promise<ScanReport> {
   const started = Date.now();
   const target = parseTargetUrl(input);
 
@@ -75,10 +84,17 @@ export async function runScan(input: string): Promise<ScanReport> {
   const probe = (path: string) =>
     request(parseTargetUrl(origin + path), { maxBytes: 64 * 1024, timeoutMs: 6000 }).catch(() => null);
 
-  const [exposure, securityTxt, corsRes] = await Promise.all([
+  // Email & DNS checks only make sense for real domain names, not raw IPs.
+  const host = finalUrl.hostname;
+  const isDomain = !net.isIP(host.replace(/^\[|\]$/g, "")) && host.includes(".");
+  const dns = options.dns ?? createDnsClient();
+
+  const [exposure, securityTxt, corsRes, emailFindings, dnsFindings] = await Promise.all([
     runExposureChecks(probe),
     probe("/.well-known/security.txt"),
     request(finalUrl, { headers: { Origin: PROBE_ORIGIN }, maxBytes: 1024, timeoutMs: 6000 }).catch(() => null),
+    isDomain ? runEmailChecks(host, dns).catch(() => []) : Promise.resolve([]),
+    isDomain ? runDnsChecks(host, dns).catch(() => []) : Promise.resolve([]),
   ]);
 
   const findings: Finding[] = [
@@ -101,6 +117,8 @@ export async function runScan(input: string): Promise<ScanReport> {
     checkSecurityTxt(securityTxt),
     ...runContentChecks(final.body, isHttps, final.headers),
     runCorsCheck(corsRes),
+    ...emailFindings,
+    ...dnsFindings,
   );
 
   const score = computeScore(findings);

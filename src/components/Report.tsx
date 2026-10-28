@@ -12,8 +12,10 @@ const CATEGORY_LABEL: Record<Category, string> = {
   cors: "Cross-origin (CORS)",
   content: "Page content",
   disclosure: "Information disclosure",
+  email: "Email security",
+  dns: "DNS security",
 };
-const CATEGORY_ORDER: Category[] = ["transport", "exposure", "headers", "cookies", "cors", "content", "disclosure"];
+const CATEGORY_ORDER: Category[] = ["transport", "exposure", "headers", "cookies", "email", "dns", "cors", "content", "disclosure"];
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 const SEVERITY_STYLE: Record<Severity, string> = {
   critical: "text-sev-critical bg-sev-critical/10 ring-sev-critical/30",
@@ -47,9 +49,13 @@ function toMarkdown(r: ScanReport): string {
   return lines.join("\n");
 }
 
-export default function Report({ report, onRescan }: { report: ScanReport; onRescan: () => void }) {
+type ShareState = { status: "idle" | "working" | "done" | "error"; url?: string; message?: string };
+
+export default function Report({ report, onRescan, readOnly = false }: { report: ScanReport; onRescan?: () => void; readOnly?: boolean }) {
   const [filter, setFilter] = useState<Filter>("issues");
   const [copied, setCopied] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [share, setShare] = useState<ShareState>({ status: "idle" });
   const host = new URL(report.finalUrl).host;
   const issues = report.findings.filter(isIssue).length;
   const passed = report.findings.filter((f) => f.status === "pass").length;
@@ -73,6 +79,34 @@ export default function Report({ report, onRescan }: { report: ScanReport; onRes
     a.download = `securescan-${host}-${report.scannedAt.slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  async function exportPdf() {
+    setPdfBusy(true);
+    try {
+      // Loaded on demand so pdf-lib (~200 KB) isn't in the initial page bundle.
+      const { downloadReportPdf } = await import("@/lib/pdf");
+      await downloadReportPdf(report);
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  async function createShareLink() {
+    setShare({ status: "working" });
+    try {
+      const res = await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: report.id }),
+      });
+      const data = (await res.json()) as { url?: string; error?: string };
+      if (!res.ok || !data.url) throw new Error(data.error ?? "Could not create link.");
+      setShare({ status: "done", url: data.url });
+      navigator.clipboard?.writeText(data.url).catch(() => {});
+    } catch (e) {
+      setShare({ status: "error", message: e instanceof Error ? e.message : "Could not create link." });
+    }
   }
 
   async function copyMarkdown() {
@@ -111,10 +145,25 @@ export default function Report({ report, onRescan }: { report: ScanReport; onRes
           </div>
         </div>
         <div className="mt-8 flex flex-wrap gap-2 border-t border-ink-800 pt-5">
-          <ActionButton onClick={onRescan}>↻ Rescan</ActionButton>
+          {!readOnly && onRescan && <ActionButton onClick={onRescan}>↻ Rescan</ActionButton>}
+          {!readOnly && report.shareAvailable && (
+            <ActionButton onClick={createShareLink} disabled={share.status === "working"} primary>
+              {share.status === "working" ? "Creating link…" : share.status === "done" ? "Link copied ✓" : "Share link"}
+            </ActionButton>
+          )}
+          <ActionButton onClick={exportPdf} disabled={pdfBusy}>{pdfBusy ? "Building PDF…" : "Export PDF"}</ActionButton>
           <ActionButton onClick={download}>Download JSON</ActionButton>
           <ActionButton onClick={copyMarkdown}>{copied ? "Copied ✓" : "Copy as Markdown"}</ActionButton>
         </div>
+        {share.status === "done" && share.url && (
+          <div className="mt-4 flex flex-col gap-2 rounded-lg border border-signal-dim bg-signal/5 px-4 py-3 text-sm sm:flex-row sm:items-center">
+            <span className="shrink-0 text-ink-300">Shareable link (valid 30 days):</span>
+            <a href={share.url} target="_blank" rel="noopener noreferrer" className="truncate font-mono text-signal hover:underline">{share.url}</a>
+          </div>
+        )}
+        {share.status === "error" && (
+          <p role="alert" className="mt-4 text-sm text-[#ffb3ba]">{share.message}</p>
+        )}
       </div>
 
       {/* Filters */}
@@ -243,11 +292,16 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function ActionButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+function ActionButton({ onClick, children, disabled, primary }: { onClick: () => void; children: React.ReactNode; disabled?: boolean; primary?: boolean }) {
   return (
     <button
       onClick={onClick}
-      className="rounded-lg border border-ink-700 bg-ink-850 px-3.5 py-2 text-sm text-ink-300 transition hover:border-ink-600 hover:text-ink-100 active:scale-[0.98]"
+      disabled={disabled}
+      className={`rounded-lg border px-3.5 py-2 text-sm transition active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 ${
+        primary
+          ? "border-signal-dim bg-signal/10 text-signal hover:bg-signal/15"
+          : "border-ink-700 bg-ink-850 text-ink-300 hover:border-ink-600 hover:text-ink-100"
+      }`}
     >
       {children}
     </button>

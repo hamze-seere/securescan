@@ -8,7 +8,9 @@ export type Category =
   | "disclosure"
   | "exposure"
   | "content"
-  | "cors";
+  | "cors"
+  | "email"
+  | "dns";
 
 export interface Finding {
   id: string;
@@ -67,4 +69,6 @@ export interface ScanReport {
   tls: TlsInfo | null;
   redirectChain: { url: string; status: number }[];
   responseHeaders: Record<string, string | string[]>;
+  /** Set by the API: whether this report can be turned into a share link. */
+  shareAvailable?: boolean;
 }

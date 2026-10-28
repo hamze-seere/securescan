@@ -1,0 +1,30 @@
+name: Security scan
+
+# Scans the live site after every successful production deployment,
+# every Monday morning, and on demand from the Actions tab.
+on:
+  deployment_status:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  securescan:
+    if: >
+      github.event_name != 'deployment_status' ||
+      (github.event.deployment_status.state == 'success' &&
+       github.event.deployment_status.environment == 'Production')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        uses: ./ # this repository's own action.yml (others use: hamzeayuub-bot/securescan@main)
+        with:
+          # Your public production domain. Set the SECURESCAN_URL repository variable
+          # (Settings -> Secrets and variables -> Actions -> Variables) to override.
+          url: ${{ vars.SECURESCAN_URL || 'https://securescan-hamze.vercel.app' }}
+          api-url: ${{ vars.SECURESCAN_URL || 'https://securescan-hamze.vercel.app' }}
+          min-grade: A
