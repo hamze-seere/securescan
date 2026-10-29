@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-export const GITHUB_URL = "https://github.com/hamzeayuub-bot/securescan";
+export const GITHUB_URL = "https://github.com/hamze-seere/securescan";
 
 export function SiteHeader() {
   return (

@@ -66,7 +66,7 @@ jobs:
         github.event.deployment_status.state == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: hamzeayuub-bot/securescan@main
+      - uses: hamze-seere/securescan@main
         with:
           url: https://your-site.com
           api-url: https://securescan-hamze.vercel.app

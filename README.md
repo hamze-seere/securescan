@@ -4,8 +4,8 @@
 
 **🔗 Live demo:** https://securescan-hamze.vercel.app
 
-[![CI](https://github.com/hamzeayuub-bot/securescan/actions/workflows/ci.yml/badge.svg)](https://github.com/hamzeayuub-bot/securescan/actions/workflows/ci.yml)
-[![Security scan](https://github.com/hamzeayuub-bot/securescan/actions/workflows/security-scan.yml/badge.svg)](https://github.com/hamzeayuub-bot/securescan/actions/workflows/security-scan.yml)
+[![CI](https://github.com/hamze-seere/securescan/actions/workflows/ci.yml/badge.svg)](https://github.com/hamze-seere/securescan/actions/workflows/ci.yml)
+[![Security scan](https://github.com/hamze-seere/securescan/actions/workflows/security-scan.yml/badge.svg)](https://github.com/hamze-seere/securescan/actions/workflows/security-scan.yml)
 
 ![SecureScan report screenshot](docs/screenshot.png)
 
@@ -84,7 +84,7 @@ jobs:
     if: github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: hamzeayuub-bot/securescan@main
+      - uses: hamze-seere/securescan@main
         id: scan
         with:
           url: https://your-site.com                       # a site you own

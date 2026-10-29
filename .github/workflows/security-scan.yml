@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: scan
-        uses: ./ # this repository's own action.yml (others use: hamzeayuub-bot/securescan@main)
+        uses: ./ # this repository's own action.yml (others use: hamze-seere/securescan@main)
         with:
           # Your public production domain. Set the SECURESCAN_URL repository variable
           # (Settings -> Secrets and variables -> Actions -> Variables) to override.

@@ -1,6 +1,6 @@
 name: "SecureScan security check"
 description: "Scan a deployed website with SecureScan and fail the workflow if its security grade drops below a minimum."
-author: "hamzeayuub-bot"
+author: "hamze-seere"
 branding:
   icon: shield
   color: green
