@@ -20,6 +20,10 @@ inputs:
     description: "Create a 30-day shareable report link (requires sharing to be configured on the API)."
     required: false
     default: "true"
+  sarif:
+    description: "Optional path to write a SARIF 2.1.0 file for github/codeql-action/upload-sarif (findings then show in the Security tab)."
+    required: false
+    default: ""
 
 outputs:
   grade:
@@ -31,6 +35,9 @@ outputs:
   report-url:
     description: "Shareable report link, if sharing is enabled."
     value: ${{ steps.scan.outputs.report-url }}
+  sarif:
+    description: "Path of the SARIF file, when the sarif input was set."
+    value: ${{ steps.scan.outputs.sarif }}
 
 runs:
   using: composite
@@ -46,3 +53,4 @@ runs:
         INPUT_API_URL: ${{ inputs.api-url }}
         INPUT_MIN_GRADE: ${{ inputs.min-grade }}
         INPUT_SHARE: ${{ inputs.share }}
+        INPUT_SARIF: ${{ inputs.sarif }}

@@ -1,5 +1,5 @@
 import type { Finding } from "../types";
-import { getHeader, truncate, type Headers } from "./util";
+import { getHeader, getHeaderList, truncate, type Headers } from "./util";
 
 const SIX_MONTHS = 15_552_000;
 
@@ -14,9 +14,35 @@ export function parseCsp(value: string): Map<string, string[]> {
   return directives;
 }
 
+/**
+ * Every enforced CSP header policy. Repeated headers arrive as an array (see httpClient), and a
+ * single header may also hold several policies separated by commas (RFC 9110 field combining).
+ */
+export function cspPolicies(headers: Headers, name = "content-security-policy"): string[] {
+  return getHeaderList(headers, name)
+    .flatMap((v) => v.split(","))
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+/** `<meta http-equiv="Content-Security-Policy" content="…">` policies from the page body. */
+export function metaCspPolicies(html: string): string[] {
+  const out: string[] = [];
+  for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
+    if (!/http-equiv\s*=\s*["']?content-security-policy["'\s>]/i.test(tag)) continue;
+    const content = tag.match(/content\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const value = (content?.[1] ?? content?.[2] ?? "").replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").trim();
+    if (value) out.push(value);
+  }
+  return out;
+}
+
+const ONE_YEAR = 31_536_000;
+
 export function checkHsts(headers: Headers, isHttps: boolean): Finding {
   const base = { id: "hsts", category: "headers" as const, title: "Strict-Transport-Security (HSTS)" };
-  const value = getHeader(headers, "strict-transport-security");
+  // Browsers only honour the first HSTS header.
+  const value = getHeaderList(headers, "strict-transport-security")[0];
   const recommendation =
     "Send `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` on HTTPS responses.";
 
@@ -32,19 +58,60 @@ export function checkHsts(headers: Headers, isHttps: boolean): Finding {
     return { ...base, status: "warn", severity: "medium", evidence: value, recommendation,
       description: `HSTS max-age is ${maxAge}s. Use at least 6 months (15552000s) to get real protection.` };
   }
-  const extras = [/includesubdomains/i.test(value) && "includeSubDomains", /preload/i.test(value) && "preload"].filter(Boolean);
+  const subdomains = /includesubdomains/i.test(value);
+  const preload = /(^|;)\s*preload\s*(;|$)/i.test(value);
+  const extras = [subdomains && "includeSubDomains", preload && "preload"].filter(Boolean);
+  const days = Math.round(maxAge / 86400);
+  if (preload && (maxAge < ONE_YEAR || !subdomains)) {
+    // hstspreload.org rejects the submission, so the `preload` token gives a false sense of safety.
+    return { ...base, status: "warn", severity: "low", evidence: value,
+      recommendation: "For the preload list use `max-age` of at least 31536000 together with `includeSubDomains` and `preload`.",
+      description: `HSTS is enabled for ${days} days, but the \`preload\` directive is set without meeting the preload list's requirements (max-age of at least 1 year and includeSubDomains).` };
+  }
   return { ...base, status: "pass", severity: "high", evidence: value,
-    description: `HSTS is enabled for ${Math.round(maxAge / 86400)} days${extras.length ? ` with ${extras.join(" and ")}` : ""}.` };
+    description: `HSTS is enabled for ${days} days${extras.length ? ` with ${extras.join(" and ")}` : ""}.${preload ? " The policy meets the HSTS preload list requirements." : ""}` };
 }
 
-export function checkCsp(headers: Headers): Finding {
+type CspIssue = { key: string; text: string; major: boolean };
+
+/** Weaknesses of one policy. Keys let us intersect issues across several enforced policies. */
+function cspIssues(policy: string): CspIssue[] {
+  const csp = parseCsp(policy);
+  const scriptSrc = csp.get("script-src") ?? csp.get("default-src");
+  const issues: CspIssue[] = [];
+  let usesNonceOrHash = false;
+  if (!scriptSrc) issues.push({ key: "no-script-src", major: true, text: "no `script-src` or `default-src` directive, so scripts are unrestricted" });
+  else {
+    usesNonceOrHash = scriptSrc.some((s) => s.startsWith("'nonce-") || s.startsWith("'sha"));
+    const strictDynamic = scriptSrc.includes("'strict-dynamic'");
+    // Browsers ignore 'unsafe-inline' when a nonce or hash is present, so it is only a problem without one.
+    if (scriptSrc.includes("'unsafe-inline'") && !usesNonceOrHash) issues.push({ key: "unsafe-inline", major: true, text: "`'unsafe-inline'` allows inline scripts (defeats XSS protection)" });
+    if (scriptSrc.includes("'unsafe-eval'")) issues.push({ key: "unsafe-eval", major: false, text: "`'unsafe-eval'` allows eval()" });
+    if (!strictDynamic && scriptSrc.some((s) => s === "*" || s === "http:" || s === "https:" || s === "data:")) {
+      issues.push({ key: "wildcard", major: true, text: "wildcard or scheme-only script sources let scripts load from almost anywhere" });
+    }
+  }
+  if (!csp.has("object-src") && !(csp.get("default-src") ?? []).includes("'none'")) {
+    issues.push({ key: "object-src", major: false, text: "no `object-src 'none'` (plugin content allowed)" });
+  }
+  // base-uri does not fall back to default-src. Without it an injected <base> tag can
+  // redirect relative script URLs, which defeats nonce/hash-based policies.
+  if (usesNonceOrHash && !csp.has("base-uri")) {
+    issues.push({ key: "base-uri", major: false, text: "no `base-uri` (an injected `<base>` tag could hijack relative script URLs)" });
+  }
+  return issues;
+}
+
+export function checkCsp(headers: Headers, html = ""): Finding {
   const base = { id: "csp", category: "headers" as const, title: "Content-Security-Policy (CSP)" };
-  const value = getHeader(headers, "content-security-policy");
+  const headerPolicies = cspPolicies(headers);
+  const metaPolicies = metaCspPolicies(html);
+  const policies = [...headerPolicies, ...metaPolicies];
   const reportOnly = getHeader(headers, "content-security-policy-report-only");
   const recommendation =
     "Deploy a CSP that restricts script sources, e.g. `default-src 'self'; script-src 'self' 'nonce-…'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`.";
 
-  if (!value) {
+  if (policies.length === 0) {
     return { ...base, status: "fail", severity: "high", recommendation,
       evidence: reportOnly ? `Report-only policy found: ${truncate(reportOnly)}` : undefined,
       description: reportOnly
@@ -52,38 +119,38 @@ export function checkCsp(headers: Headers): Finding {
         : "No Content-Security-Policy. CSP is the strongest browser-side defence against cross-site scripting (XSS)." };
   }
 
-  const csp = parseCsp(value);
-  const scriptSrc = csp.get("script-src") ?? csp.get("default-src");
-  const issues: string[] = [];
-  if (!scriptSrc) issues.push("no `script-src` or `default-src` directive, so scripts are unrestricted");
-  else {
-    const hasNonceOrHash = scriptSrc.some((s) => s.startsWith("'nonce-") || s.startsWith("'sha"));
-    const strictDynamic = scriptSrc.includes("'strict-dynamic'");
-    if (scriptSrc.includes("'unsafe-inline'") && !hasNonceOrHash) issues.push("`'unsafe-inline'` allows inline scripts (defeats XSS protection)");
-    if (scriptSrc.includes("'unsafe-eval'")) issues.push("`'unsafe-eval'` allows eval()");
-    if (!strictDynamic && scriptSrc.some((s) => s === "*" || s === "http:" || s === "https:" || s === "data:")) {
-      issues.push("wildcard or scheme-only script sources let scripts load from almost anywhere");
-    }
-  }
-  if (!csp.has("object-src") && !(csp.get("default-src") ?? []).includes("'none'")) {
-    issues.push("no `object-src 'none'` (plugin content allowed)");
-  }
+  // With several policies, a resource must satisfy all of them, so a weakness only
+  // remains if every policy has it.
+  const perPolicy = policies.map(cspIssues);
+  const issues = perPolicy[0].filter((i) => perPolicy.every((list) => list.some((j) => j.key === i.key)));
+  const evidence = truncate(
+    [...headerPolicies, ...metaPolicies.map((p) => `<meta> ${p}`)].join(" | "),
+    300,
+  );
+  const source = headerPolicies.length === 0
+    ? " (set with a `<meta>` tag; `frame-ancestors` and reporting do not work there)"
+    : policies.length > 1 ? ` (${policies.length} policies combined)` : "";
 
   if (issues.length === 0) {
-    return { ...base, status: "pass", severity: "high", evidence: truncate(value, 300),
-      description: "A restrictive Content-Security-Policy is in place." };
+    return { ...base, status: "pass", severity: "high", evidence,
+      description: `A restrictive Content-Security-Policy is in place${source}.` };
   }
-  return { ...base, status: "warn", severity: issues.length > 1 ? "medium" : "low", evidence: truncate(value, 300), recommendation,
-    description: `CSP is present but weak: ${issues.join("; ")}.` };
+  // A policy that still lets injected scripts run gives little XSS protection, so it costs
+  // half of a missing CSP. Hardening gaps alone are minor.
+  const major = issues.some((i) => i.major);
+  return { ...base, status: "warn", severity: major ? "high" : "low", evidence, recommendation,
+    description: `CSP is present${source} but weak: ${issues.map((i) => i.text).join("; ")}.` };
 }
 
 export function checkFraming(headers: Headers): Finding {
   const base = { id: "clickjacking", category: "headers" as const, title: "Clickjacking protection" };
   const xfo = getHeader(headers, "x-frame-options");
-  const csp = getHeader(headers, "content-security-policy");
-  const frameAncestors = csp ? parseCsp(csp).get("frame-ancestors") : undefined;
+  // frame-ancestors is ignored in <meta> policies, so only headers count. Any restrictive policy wins.
+  const frameAncestors = cspPolicies(headers)
+    .map((p) => parseCsp(p).get("frame-ancestors"))
+    .find((fa) => fa && !fa.includes("*"));
 
-  if (frameAncestors && !frameAncestors.includes("*")) {
+  if (frameAncestors) {
     return { ...base, status: "pass", severity: "medium", evidence: `frame-ancestors ${frameAncestors.join(" ")}`,
       description: "CSP `frame-ancestors` controls who can embed this site." };
   }
@@ -165,10 +232,10 @@ export function checkLegacyXss(headers: Headers): Finding | null {
   };
 }
 
-export function runHeaderChecks(headers: Headers, isHttps: boolean): Finding[] {
+export function runHeaderChecks(headers: Headers, isHttps: boolean, html = ""): Finding[] {
   return [
     checkHsts(headers, isHttps),
-    checkCsp(headers),
+    checkCsp(headers, html),
     checkFraming(headers),
     checkNoSniff(headers),
     checkReferrerPolicy(headers),

@@ -21,6 +21,39 @@ function redisConfig(): { url: string; token: string } | null {
   return url && token ? { url: url.replace(/\/$/, ""), token } : null;
 }
 
+/** Counters for rate limiting. Only backed by Redis: memory counters live in rateLimit.ts. */
+export interface CounterStore {
+  /** Adds 1 to key (creating it with a ttl of ttlSeconds) and returns the new count and seconds left. */
+  incr(key: string, ttlSeconds: number): Promise<{ count: number; ttl: number }>;
+}
+
+/** Runs several commands in one round trip (Upstash REST /pipeline). */
+async function redisPipeline(url: string, token: string, commands: (string | number)[][]): Promise<unknown[]> {
+  const res = await fetch(`${url}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(commands),
+    cache: "no-store",
+  });
+  const data = (await res.json()) as { result?: unknown; error?: string }[];
+  if (!res.ok || !Array.isArray(data)) throw new Error(`Redis error: ${res.status}`);
+  const failed = data.find((r) => r.error);
+  if (failed) throw new Error(`Redis error: ${failed.error}`);
+  return data.map((r) => r.result);
+}
+
+export function getCounterStore(): CounterStore | null {
+  const redis = redisConfig();
+  if (!redis) return null;
+  return {
+    incr: async (key, ttl) => {
+      // EXPIRE NX only sets the window on the first hit, so it is a fixed window per key.
+      const [count, , left] = await redisPipeline(redis.url, redis.token, [["INCR", key], ["EXPIRE", key, ttl, "NX"], ["TTL", key]]);
+      return { count: Number(count), ttl: Number(left) };
+    },
+  };
+}
+
 function redisStore(url: string, token: string): KeyValueStore {
   async function command<T>(args: (string | number)[]): Promise<T> {
     const res = await fetch(url, {
@@ -78,9 +111,8 @@ export function getStore(): KeyValueStore | null {
   return null;
 }
 
-export const PENDING_TTL = 60 * 60; // a fresh scan can be shared for 1 hour
+export const PENDING_TTL = 60 * 60; // a fresh scan can be shared for 1 hour after it ran
 export const SHARE_TTL = 60 * 60 * 24 * 30; // shared links live 30 days
 export const REPORT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-export const pendingKey = (id: string) => `securescan:scan:${id}`;
 export const sharedKey = (id: string) => `securescan:report:${id}`;

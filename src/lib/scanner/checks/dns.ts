@@ -12,6 +12,13 @@ export async function checkCaa(host: string, dns: DnsClient): Promise<Finding> {
   for (const name of domainChain(host)) {
     const records = await dns.caa(name).catch(() => []);
     if (records.length) {
+      // The closest record set applies even if it only has iodef, and iodef alone restricts no one.
+      if (!records.some((r) => r.tag === "issue" || r.tag === "issuewild")) {
+        return { ...base, status: "warn", severity: "low",
+          evidence: records.map((r) => `${name} CAA ${r.critical} ${r.tag} "${r.value}"`).join("\n"),
+          description: `The CAA record${name !== host ? ` (inherited from ${name})` : ""} only sets a reporting address (iodef) and has no \`issue\` entry, so any certificate authority may still issue certificates.`,
+          recommendation: `Add an \`issue\` entry next to it, e.g. \`0 issue "letsencrypt.org"\` (use your actual CA).` };
+      }
       const issuers = records.filter((r) => r.tag === "issue" || r.tag === "issuewild").map((r) => r.value.split(";")[0].trim() || "(none)");
       const iodef = records.some((r) => r.tag === "iodef");
       return { ...base, status: "pass", severity: "low",
@@ -30,12 +37,17 @@ export async function checkCaa(host: string, dns: DnsClient): Promise<Finding> {
 export async function checkDnssec(host: string, dns: DnsClient): Promise<Finding> {
   const base = { id: "dnssec", category: "dns" as const, title: "DNSSEC" };
   const zone = orgDomain(host);
-  const validated = await dns.dnssec(zone).catch(() => null);
-  if (validated === null) {
-    return { ...base, status: "info", severity: "info", description: "DNSSEC status could not be determined (the validating resolver didn't answer)." };
+  const status = await dns.dnssec(zone).catch(() => null);
+  if (status === null) {
+    return { ...base, status: "info", severity: "info", description: "DNSSEC status could not be determined (the DNS resolver didn't answer)." };
   }
-  return validated
-    ? { ...base, status: "pass", severity: "low", description: `${zone} is DNSSEC-signed and validates correctly, so its DNS answers can't be forged.` }
+  if (status === "broken") {
+    return { ...base, status: "fail", severity: "high",
+      description: `${zone} has DNSSEC enabled at the registrar (a DS record), but its signatures don't validate. Validating resolvers, used by a large share of internet users, cannot resolve the domain at all.`,
+      recommendation: "Fix the signing at your DNS provider, or remove the DS record at your registrar until it is fixed. https://dnsviz.net shows where the chain breaks." };
+  }
+  return status
+    ? { ...base, status: "pass", severity: "low", description: `${zone} is DNSSEC-signed (a DS record is published at the parent zone), so validating resolvers can detect forged DNS answers.` }
     : { ...base, status: "warn", severity: "low",
         description: `${zone} is not DNSSEC-signed. Attackers who can spoof DNS responses could redirect visitors or intercept email.`,
         recommendation: "Enable DNSSEC at your DNS provider (often one click in Cloudflare and others), then add the DS record at your registrar." };

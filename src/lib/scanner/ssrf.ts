@@ -51,7 +51,8 @@ export function parseTargetUrl(input: string): URL {
     throw new BlockedTargetError("Only standard web ports (80, 443, 8080, 8443) can be scanned.");
   }
 
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  // "localhost." is the same host as "localhost": drop the trailing root dot before comparing.
+  const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
   if (!allowPrivateTargets()) {
     if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
       throw new BlockedTargetError("Internal hostnames cannot be scanned.");
@@ -128,7 +129,10 @@ function isPrivateIpv6(ip: string): boolean {
     const v4 = `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`;
     return isPrivateIpv4(v4);
   }
-  if (g[0] === 0x64 && g[1] === 0xff9b) return true; // NAT64 64:ff9b::/96 (can reach internal v4)
+  if (g[0] === 0x64 && g[1] === 0xff9b) return true; // NAT64 64:ff9b::/96 and 64:ff9b:1::/48 (can reach internal v4)
+  if (g[0] === 0x100 && g.slice(1, 4).every((n) => n === 0)) return true; // 100::/64 discard-only
+  if (g[0] === 0x2001 && g[1] < 0x200) return true; // 2001::/23 IETF special purpose (Teredo, ORCHID, benchmarking…)
+  if ((g[0] & 0xffc0) === 0xfec0) return true; // fec0::/10 deprecated site-local
   if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
   if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((g[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast

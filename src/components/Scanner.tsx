@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ScanReport } from "@/lib/scanner/types";
+import { isStoredReport } from "@/lib/reportView";
 import Report from "./Report";
 import { GradeBadge } from "./GradeBadge";
 
@@ -23,7 +24,7 @@ function loadHistory(): ScanReport[] {
   try {
     const raw = window.localStorage.getItem(HISTORY_KEY);
     const parsed = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(parsed) ? (parsed as ScanReport[]).slice(0, HISTORY_MAX) : [];
+    return Array.isArray(parsed) ? parsed.filter(isStoredReport).slice(0, HISTORY_MAX) : [];
   } catch {
     return [];
   }
@@ -44,6 +45,8 @@ export default function Scanner() {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ScanReport | null>(null);
+  const [previous, setPrevious] = useState<ScanReport | undefined>(undefined);
+  const [elapsed, setElapsed] = useState(0);
   const [history, setHistory] = useState<ScanReport[]>([]);
   const resultRef = useRef<HTMLDivElement>(null);
 
@@ -55,8 +58,10 @@ export default function Scanner() {
 
   useEffect(() => {
     if (!loading) return;
+    const started = Date.now();
     const id = window.setInterval(() => setStep((s) => Math.min(s + 1, STEPS.length - 1)), 850);
-    return () => window.clearInterval(id);
+    const clock = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 250);
+    return () => { window.clearInterval(id); window.clearInterval(clock); };
   }, [loading]);
 
   async function scan(e?: React.FormEvent) {
@@ -64,6 +69,7 @@ export default function Scanner() {
     if (!url.trim() || !authorized || loading) return;
     setLoading(true);
     setStep(0);
+    setElapsed(0);
     setError(null);
     setReport(null);
     try {
@@ -77,6 +83,7 @@ export default function Scanner() {
         setError("error" in data ? data.error : `Scan failed (HTTP ${res.status}).`);
         return;
       }
+      setPrevious(history.find((h) => h.finalUrl === data.finalUrl));
       setReport(data);
       const next = [data, ...history.filter((h) => h.finalUrl !== data.finalUrl)];
       setHistory(next.slice(0, HISTORY_MAX));
@@ -145,8 +152,8 @@ export default function Scanner() {
       </section>
 
       <div ref={resultRef} className="scroll-mt-6">
-        {loading && <ScanProgress step={step} target={url} />}
-        {report && !loading && <Report report={report} onRescan={() => scan()} />}
+        {loading && <ScanProgress step={step} target={url} elapsed={elapsed} />}
+        {report && !loading && <Report report={report} previous={previous} onRescan={() => scan()} />}
       </div>
 
       {history.length > 0 && !loading && (
@@ -164,7 +171,7 @@ export default function Scanner() {
             {history.map((h) => (
               <li key={h.id}>
                 <button
-                  onClick={() => { setReport(h); setError(null); resultRef.current?.scrollIntoView({ behavior: "smooth" }); }}
+                  onClick={() => { setReport(h); setPrevious(undefined); setError(null); resultRef.current?.scrollIntoView({ behavior: "smooth" }); }}
                   className="flex w-full items-center gap-3 rounded-lg border border-ink-800 bg-ink-900/70 p-3 text-left transition hover:border-ink-600"
                 >
                   <GradeBadge grade={h.grade} size="sm" />
@@ -182,11 +189,12 @@ export default function Scanner() {
   );
 }
 
-function ScanProgress({ step, target }: { step: number; target: string }) {
+function ScanProgress({ step, target, elapsed }: { step: number; target: string; elapsed: number }) {
   return (
     <div className="animate-fade-up rounded-2xl border border-ink-800 bg-ink-900/80 p-6 font-mono text-sm" aria-live="polite">
       <p className="text-ink-400">
         <span className="text-signal">scanning</span> {target}
+        <span className="float-right tabular-nums text-ink-600" aria-hidden="true">{elapsed}s</span>
       </p>
       <ol className="relative mt-4 space-y-2 overflow-hidden" style={{ "--scan-h": `${STEPS.length * 28}px` } as React.CSSProperties}>
         <span className="pointer-events-none absolute inset-x-0 top-0 h-px animate-scan bg-gradient-to-r from-transparent via-signal to-transparent" />
