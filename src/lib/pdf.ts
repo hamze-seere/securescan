@@ -1,5 +1,7 @@
 import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage, type RGB } from "pdf-lib";
 import type { Finding, ScanReport, Severity } from "@/lib/scanner/types";
+import { categoryScores } from "@/lib/scanner/score";
+import { CATEGORY_LABEL, CATEGORY_ORDER } from "@/lib/reportView";
 
 /**
  * Builds a printable PDF report in the browser (no server round-trip).
@@ -125,6 +127,12 @@ export async function buildReportPdf(report: ScanReport): Promise<Uint8Array> {
   }
   y -= 44;
 
+  if (report.partial) {
+    page.drawRectangle({ x: M, y: y - 6, width: W, height: 20, color: C.panel });
+    text("Some checks did not finish within the time limit, so this report is partial.", M + 8, 9, bold, C.text);
+    y -= 32;
+  }
+
   // ---- Findings
   const issues = report.findings.filter((f) => f.status === "fail" || f.status === "warn").sort((a, b) => RANK[a.severity] - RANK[b.severity]);
   const passed = report.findings.filter((f) => f.status === "pass");
@@ -166,6 +174,26 @@ export async function buildReportPdf(report: ScanReport): Promise<Uint8Array> {
     }
     y -= 10;
   };
+
+  const subscores = categoryScores(report.findings);
+  if (subscores.length) {
+    section("Score by category", 30);
+    const colW = W / 3;
+    CATEGORY_ORDER.flatMap((cat) => subscores.filter((s) => s.category === cat)).forEach((s, i) => {
+      const col = i % 3;
+      if (col === 0 && i > 0) y -= 24;
+      if (col === 0) ensure(24);
+      const x = M + col * colW;
+      const barW = colW - 16;
+      text(CATEGORY_LABEL[s.category], x, 8.5, regular, C.muted);
+      const label = String(s.score);
+      text(label, x + barW - bold.widthOfTextAtSize(label, 8.5), 8.5, bold, C.ink);
+      page.drawRectangle({ x, y: y - 8, width: barW, height: 3.5, color: C.line });
+      const fill = s.score >= 90 ? C.signal : s.score >= 60 ? SEV.medium : SEV.critical;
+      page.drawRectangle({ x, y: y - 8, width: Math.max(1, (barW * s.score) / 100), height: 3.5, color: fill });
+    });
+    y -= 40;
+  }
 
   section(`Issues found (${issues.length})`);
   if (!issues.length) { text("No issues found.", M, 10); y -= 20; }

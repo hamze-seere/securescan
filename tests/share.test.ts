@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { getSharedReport, rememberScan, shareScan } from "../src/lib/reports";
+import { getSharedReport, shareScan, signForSharing } from "../src/lib/reports";
 import { getStore } from "../src/lib/store";
 import type { ScanReport } from "../src/lib/scanner/types";
 
@@ -12,31 +12,56 @@ const fakeReport = (): ScanReport => ({
   summary: { critical: 0, high: 0, medium: 1, low: 0, info: 0 }, findings: [], tls: null, redirectChain: [], responseHeaders: {},
 });
 
+/** What the browser sends back: the report after a JSON round trip. */
+const roundTrip = (r: ScanReport) => JSON.parse(JSON.stringify(r)) as ScanReport;
+
 test("dev uses the in-memory store", () => {
   assert.equal(getStore()?.kind, "memory");
 });
 
-test("a server-produced scan can be shared and read back", async () => {
+test("a server-signed scan can be shared and read back", async () => {
   const report = fakeReport();
-  assert.equal(await rememberScan(report), true);
-  assert.equal(await getSharedReport(report.id), null, "not public until shared");
+  assert.equal(signForSharing(report), true);
+  assert.ok(report.shareToken);
+  assert.equal(await getSharedReport(report.id), null, "nothing is stored until shared");
 
-  const result = await shareScan(report.id);
+  const result = await shareScan(roundTrip(report));
   assert.equal(result.ok, true);
   const shared = await getSharedReport(report.id);
   assert.equal(shared?.grade, "B");
+  assert.equal(shared?.shareToken, undefined, "the token is not published");
 });
 
-test("cannot share a report the server never produced (anti-forgery)", async () => {
-  const result = await shareScan(randomUUID());
-  assert.deepEqual(result.ok ? null : result.status, 404);
+test("cannot share a report the server never signed (anti-forgery)", async () => {
+  const unsigned = await shareScan(fakeReport());
+  assert.equal(unsigned.ok ? 0 : unsigned.status, 403);
+
+  const forged = fakeReport();
+  signForSharing(forged);
+  const tampered = { ...roundTrip(forged), grade: "F" as const };
+  const result = await shareScan(tampered);
+  assert.equal(result.ok ? 0 : result.status, 403);
+  assert.equal(await getSharedReport(forged.id), null);
+});
+
+test("signed reports expire after an hour", async () => {
+  const report = fakeReport();
+  signForSharing(report);
+  const result = await shareScan(roundTrip(report), Date.now() + 61 * 60_000);
+  assert.equal(result.ok ? 0 : result.status, 410);
 });
 
 test("rejects malformed ids (no key injection)", async () => {
   for (const id of ["../../etc", "abc", "securescan:report:x", ""]) {
-    const result = await shareScan(id);
+    const report = { ...fakeReport(), id };
+    signForSharing(report);
+    const result = await shareScan(report);
     assert.equal(result.ok ? 0 : result.status, 400, id);
     assert.equal(await getSharedReport(id), null);
+  }
+  for (const bad of [null, "x", 42, {}]) {
+    const result = await shareScan(bad);
+    assert.equal(result.ok ? 0 : result.status, 400);
   }
 });
 
@@ -46,6 +71,7 @@ test("production without Redis disables sharing instead of using memory", () => 
   env.NODE_ENV = "production";
   try {
     assert.equal(getStore(), null);
+    assert.equal(signForSharing(fakeReport()), false);
   } finally {
     env.NODE_ENV = prev;
   }
@@ -75,10 +101,11 @@ test("Redis REST client speaks the Upstash protocol", async () => {
   try {
     assert.equal(getStore()?.kind, "redis");
     const report = fakeReport();
-    assert.equal(await rememberScan(report), true);
-    assert.equal((await shareScan(report.id)).ok, true);
+    assert.equal(signForSharing(report), true);
+    assert.deepEqual(seen, [], "signing a scan costs no Redis call");
+    assert.equal((await shareScan(roundTrip(report))).ok, true);
     assert.equal((await getSharedReport(report.id))?.id, report.id);
-    assert.deepEqual(seen, ["SET", "GET", "GET", "SET", "GET"]);
+    assert.deepEqual(seen, ["SET", "GET"]);
   } finally {
     delete process.env.KV_REST_API_URL;
     delete process.env.KV_REST_API_TOKEN;

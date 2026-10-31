@@ -17,7 +17,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci || npm install
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
       - name: Unit & integration tests
         run: npm test
       - name: Production build (includes type checking)

@@ -15,7 +15,19 @@ export interface RequestOptions {
   /** Max (decompressed) body bytes to keep. Protects against huge pages and zip bombs. */
   maxBytes?: number;
   timeoutMs?: number;
+  /** Aborts the request early, e.g. when the overall scan time budget runs out. */
+  signal?: AbortSignal;
 }
+
+export class ScanBudgetError extends Error {
+  constructor() {
+    super("Scan time budget exceeded");
+    this.name = "ScanBudgetError";
+  }
+}
+
+/** Headers whose repeated values must stay separate: joining them with ", " changes their meaning. */
+const DISTINCT_HEADERS = ["content-security-policy", "content-security-policy-report-only", "strict-transport-security"];
 
 /**
  * DNS lookup hook used for every connection. It resolves the hostname and only
@@ -60,16 +72,22 @@ function readTlsInfo(socket: TLSSocket): TlsInfo {
 
 /** Performs a single HTTP(S) request without following redirects. */
 export function request(url: URL, opts: RequestOptions = {}): Promise<HttpResponseData> {
-  const { method = "GET", headers = {}, maxBytes = 512 * 1024, timeoutMs = 8000 } = opts;
+  const { method = "GET", headers = {}, maxBytes = 512 * 1024, timeoutMs = 8000, signal } = opts;
   const lib = url.protocol === "https:" ? https : http;
 
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new ScanBudgetError());
     let settled = false;
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       fn();
+    };
+    const onAbort = () => {
+      req.destroy();
+      finish(() => reject(new ScanBudgetError()));
     };
 
     const req = lib.request(
@@ -103,17 +121,25 @@ export function request(url: URL, opts: RequestOptions = {}): Promise<HttpRespon
           else if (encoding === "deflate") stream = res.pipe(zlib.createInflate());
         }
 
+        const responseHeaders = { ...res.headers } as Record<string, string | string[]>;
+        for (const name of DISTINCT_HEADERS) {
+          const values = res.headersDistinct[name];
+          if (values && values.length > 1) responseHeaders[name] = values;
+        }
+
         const chunks: Buffer[] = [];
         let size = 0;
+        let truncated = false;
         const done = () =>
           finish(() =>
             resolve({
               url: url.toString(),
               status: res.statusCode ?? 0,
-              headers: res.headers as Record<string, string | string[]>,
+              headers: responseHeaders,
               body: Buffer.concat(chunks).toString("utf8"),
               remoteAddress,
               tls,
+              truncated,
             }),
           );
 
@@ -123,6 +149,7 @@ export function request(url: URL, opts: RequestOptions = {}): Promise<HttpRespon
           chunks.push(chunk.length > room ? chunk.subarray(0, room) : chunk);
           size += Math.min(chunk.length, room);
           if (size >= maxBytes) {
+            truncated = true;
             done(); // got enough - stop downloading
             res.destroy();
           }
@@ -138,6 +165,7 @@ export function request(url: URL, opts: RequestOptions = {}): Promise<HttpRespon
       finish(() => reject(new Error(`Timed out after ${timeoutMs / 1000}s`)));
     }, timeoutMs);
 
+    signal?.addEventListener("abort", onAbort, { once: true });
     req.on("error", (err) => finish(() => reject(err)));
     req.end();
   });
@@ -150,6 +178,7 @@ export async function fetchWithRedirects(
 ): Promise<FetchResult> {
   const { maxRedirects = 5, ...reqOpts } = opts;
   const chain: { url: string; status: number }[] = [];
+  const hopCookies: string[] = [];
   let current = start;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -157,12 +186,15 @@ export async function fetchWithRedirects(
     chain.push({ url: res.url, status: res.status });
     const location = res.headers["location"];
     if (res.status >= 300 && res.status < 400 && typeof location === "string") {
+      // Cookies set on a redirect (often the session cookie on "/" -> "/login") still reach the browser.
+      const setCookie = res.headers["set-cookie"];
+      if (setCookie) hopCookies.push(...(Array.isArray(setCookie) ? setCookie : [setCookie]));
       if (hop === maxRedirects) throw new Error(`Too many redirects (>${maxRedirects}).`);
       // Re-validate: a public site must not be able to bounce us into an internal one.
       current = parseTargetUrl(new URL(location, current).toString());
       continue;
     }
-    return { final: res, chain };
+    return { final: res, chain, hopCookies };
   }
   throw new Error("Redirect handling failed.");
 }

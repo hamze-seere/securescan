@@ -57,3 +57,15 @@ test("decimal / hex IP encodings are normalised by the URL parser and blocked", 
     assert.throws(() => parseTargetUrl(input), BlockedTargetError, input);
   }
 });
+
+test("blocks the less common reserved IPv6 ranges", () => {
+  for (const ip of ["fec0::1", "100::1", "64:ff9b:1::a00:1", "2001::1", "2001:10::1", "2001:db8::1"]) {
+    assert.equal(isPrivateIp(ip), true, ip);
+  }
+});
+
+test("a trailing root dot does not get around the hostname rules", () => {
+  for (const input of ["http://localhost./", "http://localhost../", "http://metadata.google.internal./", "http://printer.local./"]) {
+    assert.throws(() => parseTargetUrl(input), BlockedTargetError, input);
+  }
+});

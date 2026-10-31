@@ -1,22 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { Category, Finding, ScanReport, Severity } from "@/lib/scanner/types";
+import { useMemo, useRef, useState } from "react";
+import type { Finding, ScanReport, Severity } from "@/lib/scanner/types";
+import { categoryScores } from "@/lib/scanner/score";
+import { CATEGORY_LABEL, CATEGORY_ORDER, diffReports, isIssue, SEVERITY_RANK, toMarkdown } from "@/lib/reportView";
 import { GradeDial } from "./GradeBadge";
 
-const CATEGORY_LABEL: Record<Category, string> = {
-  transport: "Transport & TLS",
-  headers: "Security headers",
-  cookies: "Cookies",
-  exposure: "Exposed files",
-  cors: "Cross-origin (CORS)",
-  content: "Page content",
-  disclosure: "Information disclosure",
-  email: "Email security",
-  dns: "DNS security",
-};
-const CATEGORY_ORDER: Category[] = ["transport", "exposure", "headers", "cookies", "email", "dns", "cors", "content", "disclosure"];
-const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 const SEVERITY_STYLE: Record<Severity, string> = {
   critical: "text-sev-critical bg-sev-critical/10 ring-sev-critical/30",
   high: "text-sev-high bg-sev-high/10 ring-sev-high/30",
@@ -26,39 +15,51 @@ const SEVERITY_STYLE: Record<Severity, string> = {
 };
 
 type Filter = "issues" | "passed" | "all";
-const isIssue = (f: Finding) => f.status === "fail" || f.status === "warn";
 
 /** Renders `code` spans from check descriptions. React escapes everything, so this is XSS-safe. */
 function RichText({ text }: { text: string }) {
   return <>{text.split(/(`[^`]+`)/g).map((part, i) => (part.startsWith("`") && part.endsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part))}</>;
 }
 
-function toMarkdown(r: ScanReport): string {
-  const lines = [
-    `# SecureScan report: ${new URL(r.finalUrl).host}`,
-    ``,
-    `**Grade:** ${r.grade} (${r.score}/100) · scanned ${new Date(r.scannedAt).toUTCString()}`,
-    ``,
-    `| Severity | Issue | Fix |`,
-    `|---|---|---|`,
-    ...r.findings
-      .filter(isIssue)
-      .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
-      .map((f) => `| ${f.severity} | ${f.title} | ${(f.recommendation ?? "").replace(/\|/g, "\\|")} |`),
-  ];
-  return lines.join("\n");
-}
+type ShareState = { status: "idle" | "working" | "done" | "error"; url?: string; expiresAt?: string; message?: string };
 
-type ShareState = { status: "idle" | "working" | "done" | "error"; url?: string; message?: string };
+const badgeMarkdown = (shareUrl: string, id: string) =>
+  `[![SecureScan grade](${new URL(`/api/badge?id=${id}`, shareUrl).href})](${shareUrl})`;
 
-export default function Report({ report, onRescan, readOnly = false }: { report: ScanReport; onRescan?: () => void; readOnly?: boolean }) {
+const FILTERS: [Filter, string][] = [["issues", "Issues"], ["passed", "Passed"], ["all", "All"]];
+
+export default function Report({ report, previous, onRescan, readOnly = false }: {
+  report: ScanReport;
+  /** An earlier scan of the same site, to show what changed. */
+  previous?: ScanReport;
+  onRescan?: () => void;
+  readOnly?: boolean;
+}) {
   const [filter, setFilter] = useState<Filter>("issues");
   const [copied, setCopied] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [share, setShare] = useState<ShareState>({ status: "idle" });
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const host = new URL(report.finalUrl).host;
   const issues = report.findings.filter(isIssue).length;
   const passed = report.findings.filter((f) => f.status === "pass").length;
+  const subscores = useMemo(() => {
+    const scores = categoryScores(report.findings);
+    return CATEGORY_ORDER.flatMap((cat) => scores.filter((s) => s.category === cat));
+  }, [report]);
+  const diff = useMemo(() => (previous && previous.id !== report.id ? diffReports(report, previous) : null), [report, previous]);
+
+  /** Arrow keys, Home and End move between tabs (WAI-ARIA tabs pattern). */
+  function onTabKey(e: React.KeyboardEvent, index: number) {
+    const last = FILTERS.length - 1;
+    const next = e.key === "ArrowRight" ? (index === last ? 0 : index + 1)
+      : e.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
+      : e.key === "Home" ? 0 : e.key === "End" ? last : null;
+    if (next === null) return;
+    e.preventDefault();
+    setFilter(FILTERS[next][0]);
+    tabRefs.current[next]?.focus();
+  }
 
   const grouped = useMemo(() => {
     const visible = report.findings.filter((f) =>
@@ -98,11 +99,11 @@ export default function Report({ report, onRescan, readOnly = false }: { report:
       const res = await fetch("/api/share", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: report.id }),
+        body: JSON.stringify({ report }),
       });
-      const data = (await res.json()) as { url?: string; error?: string };
+      const data = (await res.json()) as { url?: string; expiresAt?: string; error?: string };
       if (!res.ok || !data.url) throw new Error(data.error ?? "Could not create link.");
-      setShare({ status: "done", url: data.url });
+      setShare({ status: "done", url: data.url, expiresAt: data.expiresAt });
       navigator.clipboard?.writeText(data.url).catch(() => {});
     } catch (e) {
       setShare({ status: "error", message: e instanceof Error ? e.message : "Could not create link." });
@@ -157,32 +158,88 @@ export default function Report({ report, onRescan, readOnly = false }: { report:
         </div>
         {share.status === "done" && share.url && (
           <div className="mt-4 flex flex-col gap-2 rounded-lg border border-signal-dim bg-signal/5 px-4 py-3 text-sm sm:flex-row sm:items-center">
-            <span className="shrink-0 text-ink-300">Shareable link (valid 30 days):</span>
+            <span className="shrink-0 text-ink-300">
+              Shareable link{share.expiresAt ? ` (valid until ${new Date(share.expiresAt).toLocaleDateString()})` : ""}:
+            </span>
             <a href={share.url} target="_blank" rel="noopener noreferrer" className="truncate font-mono text-signal hover:underline">{share.url}</a>
+            <button
+              onClick={() => navigator.clipboard?.writeText(badgeMarkdown(share.url!, report.id)).catch(() => {})}
+              className="shrink-0 text-xs text-ink-400 underline-offset-2 hover:text-ink-100 hover:underline sm:ml-auto"
+            >
+              Copy README badge
+            </button>
           </div>
         )}
         {share.status === "error" && (
           <p role="alert" className="mt-4 text-sm text-[#ffb3ba]">{share.message}</p>
         )}
+        {report.partial && (
+          <p role="note" className="mt-4 rounded-lg border border-sev-medium/30 bg-sev-medium/10 px-4 py-3 text-sm text-ink-100">
+            Some checks didn&apos;t finish within the time limit, so this report is partial. Rescan to try again.
+          </p>
+        )}
       </div>
+
+      {diff && (
+        <section aria-label="Changes since the last scan" className="mt-6 rounded-xl border border-ink-800 bg-ink-900/60 px-5 py-4 text-sm">
+          <p className="text-ink-300">
+            Since your scan on {new Date(diff.scannedAt).toLocaleDateString()}:{" "}
+            <span className="font-mono text-ink-100">{diff.previousGrade} ({diff.previousScore})</span>
+            {" → "}
+            <span className="font-mono text-ink-100">{report.grade} ({report.score})</span>
+            {!diff.newIssues.length && !diff.fixed.length && " · no change in issues"}
+          </p>
+          {diff.fixed.length > 0 && (
+            <p className="mt-2 text-sev-pass">Fixed: {diff.fixed.map((f) => f.title).join(", ")}</p>
+          )}
+          {diff.newIssues.length > 0 && (
+            <p className="mt-2 text-sev-medium">New: {diff.newIssues.map((f) => f.title).join(", ")}</p>
+          )}
+        </section>
+      )}
+
+      {/* Score by category */}
+      {subscores.length > 0 && (
+        <section aria-label="Score by category" className="mt-6 grid gap-x-6 gap-y-3 rounded-xl border border-ink-800 bg-ink-900/60 p-5 sm:grid-cols-2 lg:grid-cols-3">
+          {subscores.map((s) => (
+            <div key={s.category} className="text-sm">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-ink-300">{CATEGORY_LABEL[s.category]}</span>
+                <span className="font-mono text-ink-100">{s.score}</span>
+              </div>
+              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-ink-800" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={s.score} aria-label={`${CATEGORY_LABEL[s.category]} score`}>
+                <div
+                  className={`h-full rounded-full ${s.score >= 90 ? "bg-sev-pass" : s.score >= 60 ? "bg-sev-medium" : "bg-sev-critical"}`}
+                  style={{ width: `${s.score}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* Filters */}
       <div role="tablist" aria-label="Filter findings" className="mt-8 inline-flex rounded-lg border border-ink-800 bg-ink-900 p-1 text-sm">
-        {([["issues", `Issues (${issues})`], ["passed", `Passed (${passed})`], ["all", "All"]] as [Filter, string][]).map(([key, label]) => (
+        {FILTERS.map(([key, label], i) => (
           <button
             key={key}
+            ref={(el) => { tabRefs.current[i] = el; }}
+            id={`tab-${key}`}
             role="tab"
             aria-selected={filter === key}
+            aria-controls="findings-panel"
+            tabIndex={filter === key ? 0 : -1}
             onClick={() => setFilter(key)}
+            onKeyDown={(e) => onTabKey(e, i)}
             className={`rounded-md px-3.5 py-1.5 transition ${filter === key ? "bg-ink-700 text-ink-100" : "text-ink-400 hover:text-ink-100"}`}
           >
-            {label}
+            {key === "issues" ? `${label} (${issues})` : key === "passed" ? `${label} (${passed})` : label}
           </button>
         ))}
       </div>
 
       {/* Findings */}
-      <div className="mt-6 space-y-8">
+      <div id="findings-panel" role="tabpanel" aria-labelledby={`tab-${filter}`} className="mt-6 space-y-8">
         {grouped.length === 0 && (
           <p className="rounded-xl border border-ink-800 bg-ink-900/60 p-6 text-sm text-ink-300">
             {filter === "issues" ? "No issues found. This site is in excellent shape. 🎉" : "Nothing to show."}
