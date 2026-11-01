@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import type { EmailReport } from "@/lib/emailCheck";
 import { FindingRow } from "./Report";
+import { AddressPanel, RiskPanel, VerifyPanel } from "./EmailInsights";
 
 /** Email breach check. Results stay in memory only: nothing is saved in the browser or on the server. */
 export default function EmailCheck() {
@@ -45,8 +46,8 @@ export default function EmailCheck() {
       <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-signal">Email breach check</h2>
       <p className="mt-3 max-w-xl text-2xl font-semibold tracking-tight text-balance">Has your email address leaked in a data breach?</p>
       <p className="mt-4 max-w-xl leading-relaxed text-ink-300">
-        See which known breaches include an address and what kind of data leaked, plus whether its domain is protected
-        against email spoofing. The address is never stored or logged.
+        See which known breaches include an address, how risky that is and what kind of data leaked, who hosts the
+        mailbox, and whether its domain is protected against spoofing. The address is never stored or logged.
       </p>
 
       <form onSubmit={check} className="mt-8 max-w-2xl">
@@ -117,6 +118,10 @@ function EmailResult({ report }: { report: EmailReport }) {
             : "Good news. This doesn't guarantee the address never leaked, only that it isn't in the breaches this database knows about."}
         </p>
       </div>
+
+      {breached && <RiskPanel risk={report.risk} breachCount={count} />}
+      <AddressPanel address={report.address} domain={report.domain} />
+      {report.verifyAvailable && <VerifyPanel />}
 
       {breached && (
         <div>

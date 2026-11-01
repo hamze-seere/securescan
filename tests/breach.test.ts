@@ -28,6 +28,8 @@ const quietDns: DnsClient = {
   dnssec: async () => false,
 };
 
+const noAge = async () => null;
+
 const found: BreachResult = {
   source: "xposedornot",
   breaches: [{ name: "Example Breach", domain: "breached.example", date: "2019", dataTypes: ["Email addresses", "Passwords"] }],
@@ -106,11 +108,11 @@ test("XposedOrNot: maps breaches, handles not-found and network failure", async 
 
 test("checkEmail: rejects invalid addresses and missing consent", async () => {
   const lookup = async () => found;
-  assert.equal((await checkEmail({ email: "nope", authorized: true }, nextIp(), { env: env(), lookup, dns: quietDns })).status, 400);
-  const res = await checkEmail({ email: "a@example.com" }, nextIp(), { env: env(), lookup, dns: quietDns });
+  assert.equal((await checkEmail({ email: "nope", authorized: true }, nextIp(), { env: env(), lookup, dns: quietDns, domainAge: noAge })).status, 400);
+  const res = await checkEmail({ email: "a@example.com" }, nextIp(), { env: env(), lookup, dns: quietDns, domainAge: noAge });
   assert.equal(res.status, 400);
   assert.match((res.body as { error: string }).error, /permission/);
-  assert.equal((await checkEmail({ email: "a@example.com", authorized: "yes" }, nextIp(), { env: env(), lookup, dns: quietDns })).status, 400);
+  assert.equal((await checkEmail({ email: "a@example.com", authorized: "yes" }, nextIp(), { env: env(), lookup, dns: quietDns, domainAge: noAge })).status, 400);
 });
 
 test("checkEmail: returns a masked address, breach summaries and domain findings", async () => {
@@ -118,7 +120,7 @@ test("checkEmail: returns a masked address, breach summaries and domain findings
   const res = await checkEmail({ email: "Hamze@Example.com", authorized: true }, nextIp(), {
     env: env(),
     lookup: async (e) => ((looked = e), found),
-    dns: quietDns,
+    dns: quietDns, domainAge: noAge,
     now: () => Date.UTC(2026, 0, 1),
   });
   assert.equal(res.status, 200);
@@ -137,7 +139,7 @@ test("checkEmail: returns a masked address, breach summaries and domain findings
 
 test("checkEmail: per-IP limit", async () => {
   const ip = nextIp();
-  const deps = { env: env({ EMAIL_RATE_LIMIT: "2" }), lookup: async () => found, dns: quietDns };
+  const deps = { env: env({ EMAIL_RATE_LIMIT: "2" }), lookup: async () => found, dns: quietDns, domainAge: noAge };
   assert.equal((await checkEmail({ email: "one@example.com", authorized: true }, ip, deps)).status, 200);
   assert.equal((await checkEmail({ email: "two@example.com", authorized: true }, ip, deps)).status, 200);
   const res = await checkEmail({ email: "three@example.com", authorized: true }, ip, deps);
@@ -146,7 +148,7 @@ test("checkEmail: per-IP limit", async () => {
 });
 
 test("checkEmail: per-address limit applies across IPs and letter case", async () => {
-  const deps = { env: env({ EMAIL_TARGET_RATE_LIMIT: "1" }), lookup: async () => found, dns: quietDns };
+  const deps = { env: env({ EMAIL_TARGET_RATE_LIMIT: "1" }), lookup: async () => found, dns: quietDns, domainAge: noAge };
   assert.equal((await checkEmail({ email: "target@example.com", authorized: true }, nextIp(), deps)).status, 200);
   const res = await checkEmail({ email: "TARGET@example.com", authorized: true }, nextIp(), deps);
   assert.equal(res.status, 429);
@@ -154,7 +156,7 @@ test("checkEmail: per-address limit applies across IPs and letter case", async (
 });
 
 test("checkEmail: site-wide daily cap", async () => {
-  const res = await checkEmail({ email: "daily@example.com", authorized: true }, nextIp(), { env: env({ EMAIL_DAILY_LIMIT: "0" }), lookup: async () => found, dns: quietDns });
+  const res = await checkEmail({ email: "daily@example.com", authorized: true }, nextIp(), { env: env({ EMAIL_DAILY_LIMIT: "0" }), lookup: async () => found, dns: quietDns, domainAge: noAge });
   assert.equal(res.status, 429);
   assert.match((res.body as { error: string }).error, /daily limit/);
 });
@@ -163,7 +165,7 @@ test("checkEmail: provider errors become 503 and never log the address", async (
   const busy = await checkEmail({ email: "busy@example.com", authorized: true }, nextIp(), {
     env: env(),
     lookup: async () => { throw new BreachProviderError("The breach database is busy right now.", 30); },
-    dns: quietDns,
+    dns: quietDns, domainAge: noAge,
   });
   assert.equal(busy.status, 503);
   assert.equal(busy.headers?.["Retry-After"], "30");
@@ -175,7 +177,7 @@ test("checkEmail: provider errors become 503 and never log the address", async (
     const res = await checkEmail({ email: "secret.person@example.com", authorized: true }, nextIp(), {
       env: env(),
       lookup: async (e) => { throw new Error(`boom for ${e}`); },
-      dns: quietDns,
+      dns: quietDns, domainAge: noAge,
     });
     assert.equal(res.status, 500);
   } finally {
@@ -195,6 +197,7 @@ test("checkEmail: slow DNS doesn't block the breach result", async () => {
       env: env(),
       lookup: async () => found,
       dns: slowDns,
+      domainAge: noAge,
       domainTimeoutMs: 50,
     });
     assert.equal(res.status, 200);

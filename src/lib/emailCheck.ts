@@ -4,10 +4,12 @@ import { runEmailChecks } from "@/lib/scanner/checks/email";
 import { breachSource, BreachProviderError, lookupBreaches, maskEmail, normalizeEmail, SOURCES, type Breach, type BreachResult } from "@/lib/breach";
 import { rateLimit } from "@/lib/rateLimit";
 import { keyedHash } from "@/lib/reports";
+import { cachedDns, classifyAddress, domainAge, mailProvider, riskSummary, type AddressInfo, type DomainAge, type RiskSummary } from "@/lib/emailInsights";
+import { verifyConfig } from "@/lib/exposure";
 
 /**
- * The email check: known breaches for one address, plus how well its domain is protected
- * against spoofing (SPF, DMARC, DKIM).
+ * The email check: known breaches for one address with a risk summary, what kind of address it
+ * is and who hosts it, its domain's age, and how well the domain is protected against spoofing.
  *
  * Privacy rules, because this looks up an address that may not be the visitor's own:
  *  - the address is never logged, stored or put in a share link; the response echoes a masked copy
@@ -25,8 +27,12 @@ export interface EmailReport {
   breaches: Breach[];
   /** Number of breaches found; can be more than `breaches.length`, which is capped. */
   breachCount: number;
-  /** SPF, DMARC, DKIM and MX for the address's domain. Empty if DNS didn't answer in time. */
+  /** SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI and MX for the address's domain. Empty if DNS didn't answer in time. */
   domainFindings: Finding[];
+  address: AddressInfo;
+  risk: RiskSummary;
+  /** Whether the owner can verify the address with an emailed code to see the full exposure report. */
+  verifyAvailable: boolean;
 }
 
 export interface EmailCheckDeps {
@@ -36,6 +42,8 @@ export interface EmailCheckDeps {
   now?: () => number;
   /** How long the domain checks may take before they're left out. */
   domainTimeoutMs?: number;
+  /** Registration date lookup; defaults to RDAP. */
+  domainAge?: (domain: string) => Promise<DomainAge | null>;
 }
 
 export type EmailCheckResult = { status: number; body: EmailReport | { error: string }; headers?: Record<string, string> };
@@ -81,11 +89,16 @@ export async function checkEmail(body: unknown, ip: string, deps: EmailCheckDeps
   const daily = await rateLimit("email-daily", limits.perDay, DAY);
   if (!daily.ok) return tooMany("The daily limit for email checks has been reached. Try again tomorrow.", daily.retryAfter);
 
-  const dns = deps.dns ?? createDnsClient();
+  const dns = cachedDns(deps.dns ?? createDnsClient());
   const lookup = deps.lookup ?? ((email: string) => lookupBreaches(email, { env }));
-  const [breaches, domainFindings] = await Promise.all([
+  const timeout = deps.domainTimeoutMs ?? DOMAIN_CHECK_MS;
+  const kind = classifyAddress(parsed.email);
+  const [breaches, domainFindings, mx, age] = await Promise.all([
     lookup(parsed.email).then((r) => ({ ok: true as const, r }), (err: unknown) => ({ ok: false as const, err })),
-    withTimeout(runEmailChecks(parsed.domain, dns), deps.domainTimeoutMs ?? DOMAIN_CHECK_MS, [] as Finding[]),
+    withTimeout(runEmailChecks(parsed.domain, dns), timeout, [] as Finding[]),
+    withTimeout(dns.mx(parsed.domain), timeout, []),
+    // A free webmail domain's age says nothing about the address, so skip the lookup.
+    kind.kind === "free" ? null : withTimeout((deps.domainAge ?? domainAge)(parsed.domain), timeout, null),
   ]);
 
   if (!breaches.ok) {
@@ -109,6 +122,9 @@ export async function checkEmail(body: unknown, ip: string, deps: EmailCheckDeps
       breaches: breaches.r.breaches,
       breachCount: breaches.r.total,
       domainFindings,
+      address: { ...kind, provider: mailProvider(mx), domainAge: age },
+      risk: riskSummary(breaches.r.breaches, deps.now?.() ?? Date.now()),
+      verifyAvailable: verifyConfig(env).available,
     },
   };
 }
