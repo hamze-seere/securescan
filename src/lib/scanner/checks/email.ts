@@ -162,10 +162,83 @@ export function checkDkim(domain: string, found: string[]): Finding {
     recommendation: "Enable DKIM signing in your email provider and publish the key it gives you." };
 }
 
+/**
+ * MTA-STS (RFC 8461) makes other mail servers insist on verified TLS when delivering to this
+ * domain, so a network attacker can't downgrade delivery to plain text. Only the DNS record is
+ * checked; the policy file it announces lives at https://mta-sts.<domain>/.well-known/mta-sts.txt.
+ */
+export function checkMtaSts(domain: string, txt: string[], hasMx: boolean): Finding {
+  const base = { id: "mta-sts", category: "email" as const, title: "MTA-STS (enforced TLS for incoming mail)" };
+  const records = txt.filter((t) => /^v=STSv1(\s*;|$)/i.test(t.trim()));
+  if (records.length === 0) {
+    return { ...base, status: "info", severity: "info",
+      description: hasMx
+        ? `No MTA-STS record at _mta-sts.${domain}. Mail sent to ${domain} can be downgraded to unencrypted delivery by an attacker on the network path.`
+        : `${domain} doesn't receive email, so MTA-STS isn't needed.`,
+      recommendation: hasMx
+        ? `Publish a policy file at https://mta-sts.${domain}/.well-known/mta-sts.txt and a TXT record at _mta-sts.${domain}: \`v=STSv1; id=20260101\`.`
+        : undefined };
+  }
+  if (records.length > 1 || !parseTags(records[0]).get("id")) {
+    return { ...base, status: "warn", severity: "low", evidence: records.join("\n"),
+      description: records.length > 1
+        ? "More than one MTA-STS record was found, so senders ignore MTA-STS for this domain."
+        : "The MTA-STS record has no `id=`, so senders ignore it.",
+      recommendation: "Keep a single record such as `v=STSv1; id=20260101`, and change the id whenever the policy changes." };
+  }
+  return { ...base, status: "pass", severity: "low", evidence: records[0],
+    description: "An MTA-STS record is published, so senders that support it will require verified TLS. Make sure the policy file uses `mode: enforce`." };
+}
+
+/** TLS-RPT (RFC 8460): where other mail servers report TLS delivery failures to this domain. */
+export function checkTlsRpt(domain: string, txt: string[], hasMx: boolean): Finding {
+  const base = { id: "tls-rpt", category: "email" as const, title: "TLS-RPT (TLS failure reports)" };
+  const record = txt.find((t) => /^v=TLSRPTv1(\s*;|$)/i.test(t.trim()));
+  if (!record) {
+    return { ...base, status: "info", severity: "info",
+      description: hasMx
+        ? `No TLS-RPT record at _smtp._tls.${domain}, so you won't hear about failed or downgraded TLS deliveries.`
+        : `${domain} doesn't receive email, so TLS-RPT isn't needed.`,
+      recommendation: hasMx ? `Add a TXT record at _smtp._tls.${domain}: \`v=TLSRPTv1; rua=mailto:tls-reports@${orgDomain(domain)}\`.` : undefined };
+  }
+  if (!/rua=\s*(mailto:|https:)/i.test(record)) {
+    return { ...base, status: "warn", severity: "low", evidence: record,
+      description: "The TLS-RPT record has no valid `rua=` reporting address, so no reports are sent.",
+      recommendation: "Add `rua=mailto:…` or `rua=https://…`." };
+  }
+  return { ...base, status: "pass", severity: "low", evidence: record, description: "TLS-RPT is set up: delivery TLS failures are reported to you." };
+}
+
+/**
+ * BIMI shows the brand logo next to authenticated mail in supporting inboxes. It only works with
+ * an enforcing DMARC policy, which is the part worth checking.
+ */
+export function checkBimi(domain: string, txt: string[], dmarcEnforced: boolean): Finding {
+  const base = { id: "bimi", category: "email" as const, title: "BIMI (brand logo in inboxes)" };
+  const record = txt.find((t) => /^v=BIMI1(\s*;|$)/i.test(t.trim()));
+  if (!record) {
+    return { ...base, status: "info", severity: "info",
+      description: `No BIMI record at default._bimi.${domain}. BIMI is optional: it shows your logo next to authenticated mail in Gmail, Apple Mail and Yahoo.`,
+      recommendation: dmarcEnforced ? undefined : "BIMI needs DMARC at `p=quarantine` or `p=reject` first." };
+  }
+  if (!dmarcEnforced) {
+    return { ...base, status: "warn", severity: "low", evidence: record,
+      description: "A BIMI record is published, but DMARC isn't enforcing, so inboxes ignore BIMI and won't show the logo.",
+      recommendation: "Move DMARC to `p=quarantine` or `p=reject` (pct=100)." };
+  }
+  const logo = parseTags(record).get("l");
+  if (!logo || !/^https:\/\//i.test(logo)) {
+    return { ...base, status: "warn", severity: "low", evidence: record,
+      description: "The BIMI record has no HTTPS logo URL (`l=`), so there's no logo to show.",
+      recommendation: "Set `l=https://…/logo.svg` pointing at an SVG Tiny PS logo." };
+  }
+  return { ...base, status: "pass", severity: "low", evidence: record, description: "BIMI is published with an enforcing DMARC policy." };
+}
+
 export async function runEmailChecks(host: string, dns: DnsClient): Promise<Finding[]> {
   const domain = host.replace(/^www\./i, "").toLowerCase();
 
-  const [txt, mx, dkimHits] = await Promise.all([
+  const [txt, mx, dkimHits, mtaSts, tlsRpt, bimi] = await Promise.all([
     dns.txt(domain).catch(() => []),
     dns.mx(domain).catch(() => []),
     Promise.all(
@@ -175,6 +248,9 @@ export async function runEmailChecks(host: string, dns: DnsClient): Promise<Find
         return recs.some((r) => /(?:^|;)\s*p=\s*[A-Za-z0-9+/]/.test(r)) ? s : null;
       }),
     ),
+    dns.txt(`_mta-sts.${domain}`).catch(() => []),
+    dns.txt(`_smtp._tls.${domain}`).catch(() => []),
+    dns.txt(`default._bimi.${domain}`).catch(() => []),
   ]);
   const hasMx = mx.some((m) => m.exchange && m.exchange !== "."); // "." = null MX (RFC 7505)
 
@@ -195,10 +271,14 @@ export async function runEmailChecks(host: string, dns: DnsClient): Promise<Find
     evidence: hasMx ? mx.sort((a, b) => a.priority - b.priority).map((m) => `${m.priority} ${m.exchange}`).join("\n") : undefined,
   };
 
+  const dmarcFinding = checkDmarc(dmarc, domain, hasMx);
   return [
     mxFinding,
     checkSpf(domain, txt, hasMx, spfLookups),
-    checkDmarc(dmarc, domain, hasMx),
+    dmarcFinding,
     checkDkim(domain, dkimHits.filter((s): s is string => s !== null)),
+    checkMtaSts(domain, mtaSts, hasMx),
+    checkTlsRpt(domain, tlsRpt, hasMx),
+    checkBimi(domain, bimi, dmarcFinding.status === "pass"),
   ];
 }

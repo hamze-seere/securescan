@@ -1,6 +1,6 @@
 # SecureScan 🛡️
 
-**A website security posture scanner.** Enter a URL and get a graded report (A+ to F) covering TLS, security headers, cookies, exposed secrets, email spoofing protection (SPF/DMARC/DKIM), DNS security, CORS and mixed content, with a plain-English explanation and a concrete fix for every issue.
+**A website security posture scanner.** Enter a URL and get a graded report (A+ to F) covering TLS, security headers, cookies, exposed secrets, email security (SPF/DMARC/DKIM, MTA-STS, TLS-RPT, BIMI), DNS security, CORS and mixed content, with a plain-English explanation and a concrete fix for every issue.
 
 **🔗 Live demo:** https://securescan-hamze.vercel.app
 
@@ -21,14 +21,17 @@
 | **Security headers** | HSTS (max-age, includeSubDomains, preload) · CSP *quality* analysis (`unsafe-inline`, `unsafe-eval`, wildcards, nonces, `strict-dynamic`) · clickjacking (XFO / `frame-ancestors`) · `nosniff` · Referrer-Policy · Permissions-Policy · COOP · deprecated X-XSS-Protection |
 | **Cookies** | `Secure`, `HttpOnly`, `SameSite`, judged more strictly for session/auth cookies |
 | **Exposed files** | `.env`, `.git/HEAD`, `.git/config`, SQL dumps, `wp-config.php.bak`, `phpinfo.php`, `server-status`, `.DS_Store`, with **content signatures** so "soft-404" sites don't produce false positives · public JavaScript source maps · open redirects through common query parameters (`next`, `url`, `redirect`…) |
-| **Email security** | SPF (missing, `+all`, `?all`, duplicate records, >10 DNS lookups) · DMARC policy, `pct`, reporting, subdomain `sp=` inheritance · DKIM keys across 20 common selectors (revoked keys ignored) · MX records |
+| **Email security** | SPF (missing, `+all`, `?all`, duplicate records, >10 DNS lookups) · DMARC policy, `pct`, reporting, subdomain `sp=` inheritance · DKIM keys across 20 common selectors (revoked keys ignored) · MX records · MTA-STS (enforced TLS for incoming mail) · TLS-RPT reporting · BIMI brand logo (only counts with an enforcing DMARC policy) |
 | **DNS security** | CAA certificate-authority restrictions (walks up the DNS tree, as the RFC requires) · DNSSEC validation via a validating DNS-over-HTTPS resolver |
 | **CORS** | Detects servers that reflect arbitrary origins, especially combined with `Allow-Credentials: true` |
 | **Content** | Active/passive mixed content · forms that submit over HTTP |
 | **Disclosure** | Versioned `Server` headers · `X-Powered-By` and other stack fingerprints · `security.txt` presence |
 
 Plus:
-- **Email breach check:** shows which known data breaches include an email address (breach name, site, date and the kinds of data leaked) and checks the address's domain for SPF, DMARC and DKIM. Uses [XposedOrNot](https://xposedornot.com) for free, or [Have I Been Pwned](https://haveibeenpwned.com) when `HIBP_API_KEY` is set. The address is never stored or logged (see the threat model)
+- **Email breach check:** shows which known data breaches include an email address (breach name, site, date and the kinds of data leaked) and checks the address's domain for SPF, DMARC and DKIM. Uses [XposedOrNot](https://xposedornot.com) for free, or [Have I Been Pwned](https://haveibeenpwned.com) when `HIBP_API_KEY` is set. The address is never stored or logged (see the threat model). Each result also shows:
+  - a **breach risk summary**: risk level, password/phone/home-address leak counts, breaches per year and the most-leaked kinds of data, with a warning when a phone number leaked
+  - the **address type** (disposable, free webmail or custom domain, role address, plus tag), the **mail provider** from MX records, and the **domain's age** from its registry (RDAP), so brand-new lookalike domains stand out
+- **Owner-verified exposure report:** the owner proves the address is theirs with a one-time code sent by email ([Resend](https://resend.com)), then sees their public Gravatar profile (photo, name, linked accounts), which breaches leaked their phone number, home address, name or date of birth, and a prioritised lock-down checklist
 - **Shareable report links:** unlisted, 30-day links for reports the server signed, so they can't be forged (see the threat model)
 - **README badge:** every shared report has an SVG grade badge at `/api/badge?id=<report id>`
 - **Changes since last scan:** rescanning a site lists the issues that are new and the ones you fixed
@@ -42,7 +45,7 @@ Plus:
 npm install
 cp .env.example .env.local
 npm run dev        # http://localhost:3000
-npm test           # 102 unit + integration tests
+npm test           # 125 unit + integration tests
 ```
 
 To scan a site running on your own machine (e.g. a XAMPP project), set `ALLOW_PRIVATE_TARGETS=true` in `.env.local`. This only works in development; the flag is ignored when `NODE_ENV=production`.
@@ -57,6 +60,15 @@ curl -X POST http://localhost:3000/api/scan \
 curl -X POST http://localhost:3000/api/email \
   -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","authorized":true}'
+
+# Owner verification: email a one-time code, then confirm it to get the exposure report
+curl -X POST http://localhost:3000/api/email/verify \
+  -H "Content-Type: application/json" \
+  -d '{"action":"send","email":"you@example.com"}'
+
+curl -X POST http://localhost:3000/api/email/verify \
+  -H "Content-Type: application/json" \
+  -d '{"action":"confirm","email":"you@example.com","code":"123456"}'
 ```
 
 ### Deploy
@@ -84,6 +96,12 @@ With Redis connected, rate limits are also shared across all serverless instance
 | `EMAIL_RATE_LIMIT` | `3` | Email checks per client IP per hour |
 | `EMAIL_TARGET_RATE_LIMIT` | `3` | Checks of one email address per hour, from all clients together |
 | `EMAIL_DAILY_LIMIT` | `90` (`2000` with HIBP) | Email checks per day for the whole site, kept under the provider's quota |
+| `RESEND_API_KEY` | | [Resend](https://resend.com) key. Turns on the owner-verified exposure report (production also needs Redis to hold the codes) |
+| `EMAIL_FROM` | `SecureScan <onboarding@resend.dev>` | Sender for verification codes. The default only delivers to your own Resend account address; verify a domain to send to anyone |
+| `EMAIL_VERIFY_RATE_LIMIT` | `3` | Codes sent per client IP per hour |
+| `EMAIL_VERIFY_TARGET_RATE_LIMIT` | `3` | Codes sent to one address per hour |
+| `EMAIL_VERIFY_DAILY_LIMIT` | `50` | Codes sent per day for the whole site |
+| `EMAIL_VERIFY_DEV_BYPASS` | `false` | Development only: skip the email and show the code on the page. Ignored when `NODE_ENV=production` |
 | `SHARE_SECRET` | derived from `KV_REST_API_TOKEN` | Key that signs reports for sharing (and keys the email rate limit). Set it to rotate the key without changing Redis |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | | Upstash Redis, for share links and shared rate limits |
 
@@ -197,6 +215,15 @@ The email check looks up an address that may belong to someone else, so it is bu
 - Users must confirm the address is **theirs or that they have permission**, and the API enforces it.
 - **Rate limits** per IP (3/hour), per address across all IPs (3/hour) and for the whole site per day, so the tool can't be used for bulk lookups or burn the provider's quota.
 
+- Address type, mail provider and domain age come from the address itself, public DNS and the domain's registry (RDAP), looked up **server-side** and cached. They say nothing about the person.
+
+The **owner-verified exposure report** (`src/lib/exposure.ts`) shows more personal detail, so it is only given to someone who can read the inbox:
+- A 6-digit code is emailed to the address. Only HMACs of the address and the code are stored, for 10 minutes; the code works once and is compared in constant time.
+- **5 wrong tries** lock that address for 10 minutes, and sends are limited per IP, per address and per day, so the endpoint can't be used to spam inboxes. Disposable inboxes are refused.
+- The report includes the public **Gravatar** profile, the only source that maps an email to a profile with the owner's consent (they published it). The photo is fetched by the server and inlined as a `data:` URL, so the browser still makes no third-party requests and the CSP is unchanged. Only PNG/JPEG/GIF/WebP up to 256 KB, and only `https:` links, are passed on.
+- It does **not** probe sign-up or password-reset forms to find accounts on other sites. That breaks those sites' terms and is how account-enumeration tools work.
+- `EMAIL_VERIFY_DEV_BYPASS` shows the code on the page for local testing and is ignored in production.
+
 Breach data comes from [XposedOrNot](https://xposedornot.com) or, with a key, [Have I Been Pwned](https://haveibeenpwned.com) (licensed under CC BY 4.0). Each result credits its source.
 
 ### Known limitations
@@ -217,6 +244,7 @@ src/
 │   ├── api/share/route.ts    # turns a server-signed scan into a 30-day link
 │   ├── api/badge/route.ts    # SVG grade badge for shared reports
 │   ├── api/email/route.ts    # email breach check endpoint
+│   ├── api/email/verify/route.ts # one-time code + owner exposure report
 │   ├── r/[id]/page.tsx       # shared report page (noindex)
 │   ├── layout.tsx / page.tsx
 │   └── globals.css           # Tailwind v4 theme tokens
@@ -227,6 +255,8 @@ src/
 │   ├── reports.ts            # HMAC-signed share flow
 │   ├── breach.ts             # breach providers (XposedOrNot, Have I Been Pwned)
 │   ├── emailCheck.ts         # email check: limits, privacy rules, domain checks
+│   ├── emailInsights.ts      # address type, mail provider, domain age (RDAP), risk summary
+│   ├── exposure.ts           # owner verification (Resend), Gravatar, lock-down steps
 │   ├── reportView.ts         # labels, Markdown export, scan-to-scan diff
 │   ├── badge.ts              # README badge SVG
 │   ├── pdf.ts                # PDF report builder (pdf-lib)
