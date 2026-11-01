@@ -28,6 +28,7 @@
 | **Disclosure** | Versioned `Server` headers · `X-Powered-By` and other stack fingerprints · `security.txt` presence |
 
 Plus:
+- **Email breach check:** shows which known data breaches include an email address (breach name, site, date and the kinds of data leaked) and checks the address's domain for SPF, DMARC and DKIM. Uses [XposedOrNot](https://xposedornot.com) for free, or [Have I Been Pwned](https://haveibeenpwned.com) when `HIBP_API_KEY` is set. The address is never stored or logged (see the threat model)
 - **Shareable report links:** unlisted, 30-day links for reports the server signed, so they can't be forged (see the threat model)
 - **README badge:** every shared report has an SVG grade badge at `/api/badge?id=<report id>`
 - **Changes since last scan:** rescanning a site lists the issues that are new and the ones you fixed
@@ -41,7 +42,7 @@ Plus:
 npm install
 cp .env.example .env.local
 npm run dev        # http://localhost:3000
-npm test           # 87 unit + integration tests
+npm test           # 102 unit + integration tests
 ```
 
 To scan a site running on your own machine (e.g. a XAMPP project), set `ALLOW_PRIVATE_TARGETS=true` in `.env.local`. This only works in development; the flag is ignored when `NODE_ENV=production`.
@@ -52,6 +53,10 @@ To scan a site running on your own machine (e.g. a XAMPP project), set `ALLOW_PR
 curl -X POST http://localhost:3000/api/scan \
   -H "Content-Type: application/json" \
   -d '{"url":"example.com","authorized":true}'
+
+curl -X POST http://localhost:3000/api/email \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","authorized":true}'
 ```
 
 ### Deploy
@@ -75,7 +80,11 @@ With Redis connected, rate limits are also shared across all serverless instance
 |---|---|---|
 | `SCAN_RATE_LIMIT` | `5` | Scans per client IP per minute |
 | `SCAN_TARGET_RATE_LIMIT` | `10` | Scans of one hostname per 10 minutes, from all clients together |
-| `SHARE_SECRET` | derived from `KV_REST_API_TOKEN` | Key that signs reports for sharing. Set it to rotate the key without changing Redis |
+| `HIBP_API_KEY` | | [Have I Been Pwned](https://haveibeenpwned.com/API/Key) key (paid). When set, email checks use HIBP instead of the free XposedOrNot API |
+| `EMAIL_RATE_LIMIT` | `3` | Email checks per client IP per hour |
+| `EMAIL_TARGET_RATE_LIMIT` | `3` | Checks of one email address per hour, from all clients together |
+| `EMAIL_DAILY_LIMIT` | `90` (`2000` with HIBP) | Email checks per day for the whole site, kept under the provider's quota |
+| `SHARE_SECRET` | derived from `KV_REST_API_TOKEN` | Key that signs reports for sharing (and keys the email rate limit). Set it to rotate the key without changing Redis |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | | Upstash Redis, for share links and shared rate limits |
 
 ---
@@ -179,6 +188,17 @@ If the share endpoint accepted a report from the browser, anyone could publish a
 - `poweredByHeader: false` and a full set of security headers (`next.config.ts`).
 - Scan history is stored only in the user's own browser (`localStorage`), not on the server.
 
+### 7. Email lookups: privacy and stalking
+The email check looks up an address that may belong to someone else, so it is built to reveal as little as possible (`src/lib/emailCheck.ts`, `src/lib/breach.ts`):
+- The address is **never stored or logged**. Errors log only the error type, and a test checks that the address never reaches the logs. The per-address rate limit is keyed by an HMAC of the address, not the address itself.
+- Responses echo only a **masked address** (`ha***@example.com`) and are sent with `Cache-Control: no-store`. Email results are not saved in scan history or share links.
+- Only **breach summaries** are returned: name, site, date and kinds of data. Never passwords, records or anything else from a leak.
+- The provider is called **from the server only**, so the browser's CSP still allows no third-party connections.
+- Users must confirm the address is **theirs or that they have permission**, and the API enforces it.
+- **Rate limits** per IP (3/hour), per address across all IPs (3/hour) and for the whole site per day, so the tool can't be used for bulk lookups or burn the provider's quota.
+
+Breach data comes from [XposedOrNot](https://xposedornot.com) or, with a key, [Have I Been Pwned](https://haveibeenpwned.com) (licensed under CC BY 4.0). Each result credits its source.
+
 ### Known limitations
 - Without Redis, rate limits are kept in memory per instance, so on serverless platforms they are only approximate.
 - The open-redirect probe only tries common parameter names on the home page. Redirects elsewhere can't be found without crawling.
@@ -196,6 +216,7 @@ src/
 │   ├── api/scan/route.ts     # POST endpoint: validation, rate limit, error mapping
 │   ├── api/share/route.ts    # turns a server-signed scan into a 30-day link
 │   ├── api/badge/route.ts    # SVG grade badge for shared reports
+│   ├── api/email/route.ts    # email breach check endpoint
 │   ├── r/[id]/page.tsx       # shared report page (noindex)
 │   ├── layout.tsx / page.tsx
 │   └── globals.css           # Tailwind v4 theme tokens
@@ -204,6 +225,8 @@ src/
 │   ├── rateLimit.ts          # Redis fixed window, in-memory fallback
 │   ├── store.ts              # Upstash Redis REST client / dev memory store
 │   ├── reports.ts            # HMAC-signed share flow
+│   ├── breach.ts             # breach providers (XposedOrNot, Have I Been Pwned)
+│   ├── emailCheck.ts         # email check: limits, privacy rules, domain checks
 │   ├── reportView.ts         # labels, Markdown export, scan-to-scan diff
 │   ├── badge.ts              # README badge SVG
 │   ├── pdf.ts                # PDF report builder (pdf-lib)

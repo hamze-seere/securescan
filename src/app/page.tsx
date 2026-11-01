@@ -1,3 +1,4 @@
+import EmailCheck from "@/components/EmailCheck";
 import Scanner from "@/components/Scanner";
 import { GITHUB_URL, SiteFooter, SiteHeader } from "@/components/SiteChrome";
 
@@ -8,6 +9,7 @@ export default function Home() {
       <main className="flex-1">
         <Scanner />
         <HowItWorks />
+        <EmailCheck />
         <CiSection />
       </main>
       <SiteFooter />
