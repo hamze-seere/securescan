@@ -26,6 +26,11 @@ function shareSecret(): Buffer {
   return (globalForSecret.__securescanShareSecret ??= randomBytes(32));
 }
 
+/** A keyed hash, so a value (such as an email address) can be counted without being stored. */
+export function keyedHash(purpose: string, value: string): string {
+  return createHmac("sha256", shareSecret()).update(`${purpose}:${value}`).digest("base64url");
+}
+
 /** The signed content: the whole report as JSON, minus the token itself. */
 function signature(report: ScanReport): string {
   const { shareToken: _token, ...rest } = report;

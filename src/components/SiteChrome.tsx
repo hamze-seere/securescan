@@ -11,6 +11,7 @@ export function SiteHeader() {
       </Link>
       <nav className="flex items-center gap-5 text-sm text-ink-400">
         <Link className="transition-colors hover:text-ink-100" href="/#how">How it works</Link>
+        <Link className="transition-colors hover:text-ink-100" href="/#email">Email breaches</Link>
         <Link className="transition-colors hover:text-ink-100" href="/#ci">CI / GitHub Action</Link>
         <a className="transition-colors hover:text-ink-100" href={GITHUB_URL} rel="noopener noreferrer" target="_blank">
           GitHub

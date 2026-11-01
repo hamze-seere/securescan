@@ -302,7 +302,7 @@ export default function Report({ report, previous, onRescan, readOnly = false }:
   );
 }
 
-function FindingRow({ f }: { f: Finding }) {
+export function FindingRow({ f }: { f: Finding }) {
   const issue = isIssue(f);
   const icon = f.status === "pass" ? "✓" : f.status === "fail" ? "✕" : f.status === "warn" ? "!" : "i";
   const iconColor = f.status === "pass" ? "text-sev-pass" : f.status === "info" ? "text-ink-400" : f.status === "fail" ? "text-sev-critical" : "text-sev-medium";
