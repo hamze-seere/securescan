@@ -20,7 +20,7 @@
 | **Transport** | HTTPS availability · certificate validity (self-signed, expired, wrong host, broken chain) · days to expiry · TLS protocol version and cipher · HTTP→HTTPS redirect |
 | **Security headers** | HSTS (max-age, includeSubDomains, preload) · CSP *quality* analysis (`unsafe-inline`, `unsafe-eval`, wildcards, nonces, `strict-dynamic`) · clickjacking (XFO / `frame-ancestors`) · `nosniff` · Referrer-Policy · Permissions-Policy · COOP · deprecated X-XSS-Protection |
 | **Cookies** | `Secure`, `HttpOnly`, `SameSite`, judged more strictly for session/auth cookies |
-| **Exposed files** | `.env`, `.git/HEAD`, `.git/config`, SQL dumps, `wp-config.php.bak`, `phpinfo.php`, `server-status`, `.DS_Store`, with **content signatures** so "soft-404" sites don't produce false positives |
+| **Exposed files** | `.env`, `.git/HEAD`, `.git/config`, SQL dumps, `wp-config.php.bak`, `phpinfo.php`, `server-status`, `.DS_Store`, with **content signatures** so "soft-404" sites don't produce false positives · public JavaScript source maps · open redirects through common query parameters (`next`, `url`, `redirect`…) |
 | **Email security** | SPF (missing, `+all`, `?all`, duplicate records, >10 DNS lookups) · DMARC policy, `pct`, reporting, subdomain `sp=` inheritance · DKIM keys across 20 common selectors (revoked keys ignored) · MX records |
 | **DNS security** | CAA certificate-authority restrictions (walks up the DNS tree, as the RFC requires) · DNSSEC validation via a validating DNS-over-HTTPS resolver |
 | **CORS** | Detects servers that reflect arbitrary origins, especially combined with `Allow-Credentials: true` |
@@ -28,10 +28,12 @@
 | **Disclosure** | Versioned `Server` headers · `X-Powered-By` and other stack fingerprints · `security.txt` presence |
 
 Plus:
-- **Shareable report links:** unlisted, 30-day links, stored server-side so they can't be forged (see the threat model)
-- **PDF export:** a professional multi-page report generated in the browser
-- **GitHub Action:** gate deployments on a minimum security grade ([setup below](#github-action))
-- Scoring and grading, a severity breakdown, redirect chain, TLS details, raw headers, JSON export, copy as Markdown, and local scan history
+- **Shareable report links:** unlisted, 30-day links for reports the server signed, so they can't be forged (see the threat model)
+- **README badge:** every shared report has an SVG grade badge at `/api/badge?id=<report id>`
+- **Changes since last scan:** rescanning a site lists the issues that are new and the ones you fixed
+- **PDF export:** a professional multi-page report generated in the browser, with a score per category
+- **GitHub Action and CLI:** gate deployments on a minimum security grade ([setup below](#github-action))
+- Scoring and grading with a score per category, a severity breakdown, redirect chain, TLS details, raw headers, JSON export, copy as Markdown, and local scan history
 
 ## Quick start
 
@@ -39,7 +41,7 @@ Plus:
 npm install
 cp .env.example .env.local
 npm run dev        # http://localhost:3000
-npm test           # 36 unit + integration tests
+npm test           # 87 unit + integration tests
 ```
 
 To scan a site running on your own machine (e.g. a XAMPP project), set `ALLOW_PRIVATE_TARGETS=true` in `.env.local`. This only works in development; the flag is ignored when `NODE_ENV=production`.
@@ -64,6 +66,17 @@ Locally, share links work out of the box (in-memory store). In production they n
 2. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` automatically. **Redeploy**.
 
 Until then, the **Share link** button is simply hidden. Everything else works.
+
+With Redis connected, rate limits are also shared across all serverless instances.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SCAN_RATE_LIMIT` | `5` | Scans per client IP per minute |
+| `SCAN_TARGET_RATE_LIMIT` | `10` | Scans of one hostname per 10 minutes, from all clients together |
+| `SHARE_SECRET` | derived from `KV_REST_API_TOKEN` | Key that signs reports for sharing. Set it to rotate the key without changing Redis |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | | Upstash Redis, for share links and shared rate limits |
 
 ---
 
@@ -102,7 +115,28 @@ jobs:
 
 Outputs: `grade`, `score`, `report-url`.
 
-This repository uses its own action: [`security-scan.yml`](.github/workflows/security-scan.yml) scans the live site after every production deployment and weekly, and [`ci.yml`](.github/workflows/ci.yml) runs tests, the production build and `npm audit` on every push.
+`@main` follows the latest code. For production pipelines, pin a full commit SHA (`hamze-seere/securescan@<sha>`) so an update can't change your build without you noticing.
+
+**Scheduled scans.** Add a `schedule` trigger to rescan weekly, which catches certificates about to expire and headers that a deploy dropped. [`security-scan.yml`](.github/workflows/security-scan.yml) is a complete example:
+
+```yaml
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
+  workflow_dispatch:
+```
+
+### CLI
+
+The same check from a terminal, with no dependencies beyond Node 20+:
+
+```bash
+npx github:hamze-seere/securescan https://your-site.com --min-grade B
+```
+
+Options: `--api <url>` (or `SECURESCAN_API`) to use your own deployment, `--sarif <file>`, `--no-share`. Exit code `1` means the grade is below the minimum, `2` means bad arguments.
+
+This repository uses its own action: [`security-scan.yml`](.github/workflows/security-scan.yml) scans the live site after every production deployment and weekly, and [`ci.yml`](.github/workflows/ci.yml) runs lint, tests, the production build and `npm audit` on every push.
 
 ---
 
@@ -121,7 +155,9 @@ An attacker submits `http://169.254.169.254/latest/meta-data/` (cloud credential
 - **Every redirect hop is re-validated**, so a public site can't `302` us into `http://localhost`.
 
 ### 2. Denial of service and resource exhaustion
-- Per-IP **rate limiting** (5 scans/min by default) on `/api/scan`, returning `429` with `Retry-After`.
+- Per-IP **rate limiting** (5 scans/min by default) on `/api/scan`, returning `429` with `Retry-After`. With Redis it holds across serverless instances.
+- A **per-target limit** (10 scans per hostname per 10 minutes), so many IPs together can't point the scanner at one site.
+- An overall **20-second budget** per scan. Checks that don't finish in time are left out and the report is marked partial instead of failing.
 - **Timeouts** on every request (8s for the page, 6s for probes) and a cap of 5 redirects.
 - **Response size caps** applied *after* decompression (512 KB for the page, 64 KB for probes), which protects against gzip/brotli zip bombs.
 
@@ -136,7 +172,7 @@ Scan results contain attacker-controlled data (headers, cookie names, URLs). Eve
 ### 5. Forged reports via share links
 If the share endpoint accepted a report from the browser, anyone could publish a fake "Grade F, `.env` exposed!" report about a site they dislike, on a legitimate-looking link under our domain.
 
-**Mitigation** (`src/lib/reports.ts`): the server stores every scan it produces for 1 hour, and `/api/share` only takes a report **id**. It can only publish reports the server itself generated. IDs are random UUIDv4s (122 bits, unguessable) validated with a strict regex (no key injection), shared pages are `noindex`, and links expire after 30 days. Covered by tests.
+**Mitigation** (`src/lib/reports.ts`): the server signs every report it produces with an HMAC-SHA256 over the whole report, and `/api/share` only publishes a report whose signature matches (compared in constant time). Changing a single field breaks the signature. Signed reports can be shared for 1 hour after the scan, and nothing is written to the store until someone shares. IDs are random UUIDv4s (122 bits, unguessable) validated with a strict regex (no key injection), the signature is removed before storing, shared pages are `noindex`, and links expire after 30 days. Covered by tests.
 
 ### 6. Information leakage
 - Unexpected errors are logged server-side; clients only get a generic message, never stack traces.
@@ -144,7 +180,8 @@ If the share endpoint accepted a report from the browser, anyone could publish a
 - Scan history is stored only in the user's own browser (`localStorage`), not on the server.
 
 ### Known limitations
-- The in-memory rate limiter is per-instance. On serverless platforms, use a shared store such as Upstash Redis.
+- Without Redis, rate limits are kept in memory per instance, so on serverless platforms they are only approximate.
+- The open-redirect probe only tries common parameter names on the home page. Redirects elsewhere can't be found without crawling.
 - TLS checks report the negotiated protocol only. They don't enumerate every supported cipher suite (use `testssl.sh` for that).
 - Content checks analyse the initial HTML, not JavaScript-rendered DOM.
 - DKIM can only be confirmed for common selector names; custom selectors can't be discovered from DNS.
@@ -157,15 +194,18 @@ If the share endpoint accepted a report from the browser, anyone could publish a
 src/
 ├── app/
 │   ├── api/scan/route.ts     # POST endpoint: validation, rate limit, error mapping
-│   ├── api/share/route.ts    # turns a server-produced scan into a 30-day link
+│   ├── api/share/route.ts    # turns a server-signed scan into a 30-day link
+│   ├── api/badge/route.ts    # SVG grade badge for shared reports
 │   ├── r/[id]/page.tsx       # shared report page (noindex)
 │   ├── layout.tsx / page.tsx
 │   └── globals.css           # Tailwind v4 theme tokens
 ├── components/               # Scanner (form + history), Report, GradeBadge, SiteChrome
 ├── lib/
-│   ├── rateLimit.ts
+│   ├── rateLimit.ts          # Redis fixed window, in-memory fallback
 │   ├── store.ts              # Upstash Redis REST client / dev memory store
-│   ├── reports.ts            # anti-forgery share flow
+│   ├── reports.ts            # HMAC-signed share flow
+│   ├── reportView.ts         # labels, Markdown export, scan-to-scan diff
+│   ├── badge.ts              # README badge SVG
 │   ├── pdf.ts                # PDF report builder (pdf-lib)
 │   └── scanner/
 │       ├── ssrf.ts           # URL + IP validation

@@ -1,13 +1,15 @@
 import type { Finding } from "../types";
 import { getHeader, type Headers } from "./util";
 
-const LEAKY_HEADERS = ["x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator", "x-drupal-cache", "x-runtime"];
+const LEAKY_HEADERS = ["x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator", "x-drupal-cache"];
+/** A dotted version number such as nginx/1.25.3 or Microsoft-IIS/10.0, but not opaque ids like "ECS (dcb/7F84)". */
+const VERSION = /(^|[/\s(])v?\d+\.\d+/;
 
 export function runDisclosureChecks(headers: Headers): Finding[] {
   const findings: Finding[] = [];
 
   const server = getHeader(headers, "server");
-  if (server && /\d/.test(server)) {
+  if (server && VERSION.test(server)) {
     findings.push({
       id: "server-version", category: "disclosure", title: "Server version disclosed",
       status: "warn", severity: "low", evidence: `Server: ${server}`,

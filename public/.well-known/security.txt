@@ -1,3 +1,5 @@
-Contact: mailto:security@your-domain.com
+Contact: https://github.com/hamze-seere/securescan/security/advisories/new
 Expires: 2027-10-28T00:00:00.000Z
 Preferred-Languages: en
+Canonical: https://securescan-hamze.vercel.app/.well-known/security.txt
+Policy: https://github.com/hamze-seere/securescan/security/policy

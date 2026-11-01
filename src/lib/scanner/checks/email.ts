@@ -26,7 +26,27 @@ export function analyzeSpf(record: string) {
   return { qualifier, lookups, hasRedirect };
 }
 
-export function checkSpf(domain: string, txt: string[], hasMx: boolean): Finding {
+/**
+ * Total DNS lookups an SPF check costs, following include: and redirect= into the records they
+ * point at (RFC 7208 counts them all against the limit of 10). Stops counting once past the limit.
+ */
+export async function countSpfLookups(record: string, dns: DnsClient, seen = new Set<string>()): Promise<number> {
+  let total = 0;
+  for (const term of record.trim().split(/\s+/).slice(1)) {
+    if (!SPF_LOOKUP_MECHANISMS.test(term)) continue;
+    total++;
+    const target = term.match(/^[+\-~?]?(?:include:|redirect=)(.+)$/i)?.[1]?.toLowerCase();
+    if (!target || seen.has(target) || total > 10) continue;
+    seen.add(target);
+    const nested = (await dns.txt(target).catch(() => [])).find((t) => /^v=spf1(\s|$)/i.test(t.trim()));
+    if (nested) total += await countSpfLookups(nested, dns, seen);
+    if (total > 10) break;
+  }
+  return total;
+}
+
+/** @param totalLookups Lookups including nested includes, when known (see countSpfLookups). */
+export function checkSpf(domain: string, txt: string[], hasMx: boolean, totalLookups?: number): Finding {
   const base = { id: "spf", category: "email" as const, title: "SPF (sender policy)" };
   const records = txt.filter((t) => /^v=spf1(\s|$)/i.test(t.trim()));
 
@@ -46,7 +66,8 @@ export function checkSpf(domain: string, txt: string[], hasMx: boolean): Finding
   }
 
   const record = records[0];
-  const { qualifier, lookups, hasRedirect } = analyzeSpf(record);
+  const { qualifier, lookups: topLevel, hasRedirect } = analyzeSpf(record);
+  const lookups = Math.max(topLevel, totalLookups ?? 0);
 
   if (qualifier === "+") {
     return { ...base, status: "fail", severity: "high", evidence: record,
@@ -55,7 +76,7 @@ export function checkSpf(domain: string, txt: string[], hasMx: boolean): Finding
   }
   if (lookups > 10) {
     return { ...base, status: "warn", severity: "medium", evidence: record,
-      description: `SPF uses ${lookups} DNS-lookup mechanisms at the top level. More than 10 causes a PermError and SPF stops working.`,
+      description: `SPF needs ${lookups > topLevel ? "more than 10 DNS lookups once its includes are followed" : `${lookups} DNS lookups`}. More than 10 causes a PermError and SPF stops working.`,
       recommendation: "Remove unused `include:` entries or flatten the record." };
   }
   if (qualifier === "?" || (!qualifier && !hasRedirect)) {
@@ -79,7 +100,7 @@ export function parseTags(record: string): Map<string, string> {
 }
 
 export function checkDmarc(
-  found: { name: string; record: string } | null,
+  found: { name: string; record: string; count?: number } | null,
   domain: string,
   hasMx: boolean,
 ): Finding {
@@ -90,10 +111,23 @@ export function checkDmarc(
       recommendation: `Add a TXT record at _dmarc.${domain}: \`v=DMARC1; p=quarantine; rua=mailto:dmarc@${orgDomain(domain)}\`, then move to \`p=reject\`.` };
   }
 
+  const failStatus = { status: hasMx ? "fail" as const : "warn" as const, severity: hasMx ? "medium" as const : "low" as const };
+  if ((found.count ?? 1) > 1) {
+    return { ...base, ...failStatus, evidence: found.record,
+      description: `${found.name} has ${found.count} DMARC records. Receivers must ignore DMARC when there is more than one, so none of them applies.`,
+      recommendation: "Keep a single `v=DMARC1` TXT record." };
+  }
+
   const tags = parseTags(found.record);
   const inherited = found.name !== `_dmarc.${domain}`;
+  const p = tags.get("p")?.toLowerCase();
+  if (!p || !["none", "quarantine", "reject"].includes(p)) {
+    return { ...base, ...failStatus, evidence: found.record,
+      description: `The DMARC record has ${p ? `an invalid policy \`p=${p}\`` : "no `p=` policy"}, so receivers treat it as broken.`,
+      recommendation: "Set `p=quarantine` or `p=reject` (or `p=none` while you collect reports)." };
+  }
   // A parent domain's policy applies to subdomains via sp= (falls back to p=).
-  const policy = ((inherited ? tags.get("sp") : undefined) ?? tags.get("p") ?? "none").toLowerCase();
+  const policy = ((inherited ? tags.get("sp") : undefined) ?? p).toLowerCase();
   const pct = Number(tags.get("pct") ?? 100);
   const reports = tags.has("rua") ? " Aggregate reports are enabled (rua)." : " No `rua` reporting address is set, so you won't see spoofing attempts.";
   const where = inherited ? ` (inherited from ${found.name})` : "";
@@ -107,6 +141,11 @@ export function checkDmarc(
     return { ...base, status: "warn", severity: "low", evidence: found.record,
       description: `DMARC policy \`${policy}\` applies to only ${pct}% of failing mail${where}.${reports}`,
       recommendation: "Increase to `pct=100` (or remove pct)." };
+  }
+  if (!inherited && tags.get("sp")?.toLowerCase() === "none") {
+    return { ...base, status: "warn", severity: "low", evidence: found.record,
+      description: `DMARC enforces \`p=${policy}\` on ${domain}, but \`sp=none\` leaves every subdomain unprotected, so attackers can send mail as any.${domain}.${reports}`,
+      recommendation: "Remove `sp=none` (subdomains then inherit p=) or set `sp=reject`." };
   }
   return { ...base, status: "pass", severity: "medium", evidence: found.record,
     description: `DMARC enforces \`p=${policy}\`${where}: spoofed email is ${policy === "reject" ? "rejected" : "sent to spam"}.${reports}` };
@@ -140,11 +179,13 @@ export async function runEmailChecks(host: string, dns: DnsClient): Promise<Find
   const hasMx = mx.some((m) => m.exchange && m.exchange !== "."); // "." = null MX (RFC 7505)
 
   // DMARC: look at the domain first, then fall back to the organisational domain.
-  let dmarc: { name: string; record: string } | null = null;
+  let dmarc: { name: string; record: string; count: number } | null = null;
   for (const name of [domain, orgDomain(domain)].filter((v, i, a) => a.indexOf(v) === i)) {
-    const rec = (await dns.txt(`_dmarc.${name}`).catch(() => [])).find((r) => /^v=DMARC1/i.test(r.trim()));
-    if (rec) { dmarc = { name: `_dmarc.${name}`, record: rec }; break; }
+    const recs = (await dns.txt(`_dmarc.${name}`).catch(() => [])).filter((r) => /^v=DMARC1/i.test(r.trim()));
+    if (recs.length) { dmarc = { name: `_dmarc.${name}`, record: recs[0], count: recs.length }; break; }
   }
+  const spf = txt.filter((t) => /^v=spf1(\s|$)/i.test(t.trim()));
+  const spfLookups = spf.length === 1 ? await countSpfLookups(spf[0], dns) : undefined;
 
   const mxFinding: Finding = {
     id: "mx", category: "email", title: "Mail servers (MX)", status: "info", severity: "info",
@@ -156,7 +197,7 @@ export async function runEmailChecks(host: string, dns: DnsClient): Promise<Find
 
   return [
     mxFinding,
-    checkSpf(domain, txt, hasMx),
+    checkSpf(domain, txt, hasMx, spfLookups),
     checkDmarc(dmarc, domain, hasMx),
     checkDkim(domain, dkimHits.filter((s): s is string => s !== null)),
   ];
