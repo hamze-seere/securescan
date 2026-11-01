@@ -187,11 +187,21 @@ test("checkEmail: provider errors become 503 and never log the address", async (
 
 test("checkEmail: slow DNS doesn't block the breach result", async () => {
   const slowDns: DnsClient = { txt: () => new Promise(() => {}), mx: () => new Promise(() => {}), caa: async () => [], dnssec: async () => false };
-  const started = Date.now();
-  const res = await checkEmail({ email: "slow@example.com", authorized: true }, nextIp(), { env: env(), lookup: async () => found, dns: slowDns });
-  assert.equal(res.status, 200);
-  assert.deepEqual((res.body as EmailReport).domainFindings, []);
-  assert.ok(Date.now() - started < 10_000);
+  // The fallback timer is unref'd (so it never holds a serverless function open), and the fake DNS
+  // never settles, so keep the event loop alive ourselves or Node exits mid-test.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const res = await checkEmail({ email: "slow@example.com", authorized: true }, nextIp(), {
+      env: env(),
+      lookup: async () => found,
+      dns: slowDns,
+      domainTimeoutMs: 50,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual((res.body as EmailReport).domainFindings, []);
+  } finally {
+    clearInterval(keepAlive);
+  }
 });
 
 const post = (body: string, headers: Record<string, string> = {}) =>

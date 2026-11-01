@@ -34,6 +34,8 @@ export interface EmailCheckDeps {
   lookup?: (email: string) => Promise<BreachResult>;
   dns?: DnsClient;
   now?: () => number;
+  /** How long the domain checks may take before they're left out. */
+  domainTimeoutMs?: number;
 }
 
 export type EmailCheckResult = { status: number; body: EmailReport | { error: string }; headers?: Record<string, string> };
@@ -83,7 +85,7 @@ export async function checkEmail(body: unknown, ip: string, deps: EmailCheckDeps
   const lookup = deps.lookup ?? ((email: string) => lookupBreaches(email, { env }));
   const [breaches, domainFindings] = await Promise.all([
     lookup(parsed.email).then((r) => ({ ok: true as const, r }), (err: unknown) => ({ ok: false as const, err })),
-    withTimeout(runEmailChecks(parsed.domain, dns), DOMAIN_CHECK_MS, [] as Finding[]),
+    withTimeout(runEmailChecks(parsed.domain, dns), deps.domainTimeoutMs ?? DOMAIN_CHECK_MS, [] as Finding[]),
   ]);
 
   if (!breaches.ok) {
